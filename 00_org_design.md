@@ -107,24 +107,33 @@ grove-stockが進化する
 ---
 
 ## 各部門のエージェント構成
-> 2026-04-07時点: 未確定。次のセッションで設計する。
+> 2026-04-07確定
 
-| 部門 | エージェント数 | 使用ツール |
-|------|-------------|---------|
-| 執行部門 | 未確定 | 未確定 |
-| リスク管理部門 | 未確定 | 未確定 |
-| 調査・研究部門 | 未確定 | 未確定（複数LLM確定）|
-| 財務・経理部門 | 未確定 | 未確定 |
-| エンジニアリング部門 | 未確定 | 未確定 |
-| ガバナンス部門 | 未確定 | 未確定 |
+| 部門 | 実体 | 使用ツール |
+|------|------|---------|
+| 執行部門 | 5ノード（ingestion / scan / vote / kelly / execution） | LangGraph scan_graph・pandas-ta・J-Quants API |
+| リスク管理部門 | 4ノード（drawdown / stopper / emergency / macro） | LangGraph monitor_graph・Grok API（日次） |
+| 調査・研究部門 | Phase 2 | 複数LLM（Claude / Grok / Qwen）|
+| 財務・経理部門 | Phase 2 | DuckDB + Python |
+| エンジニアリング部門 | Phase 2 | Claude Code + GitHub Actions |
+| ガバナンス部門 | Phase 2 | Claude API |
+
+**全ノード共通:** ルールベース（LLMなし）。例外はリスク管理部門のmacroノード（Grok API で日次マクロ検知）のみ。
 
 ---
 
-## 次のセッションでやること
+## LangGraphグラフ構成（Phase 1）
 
-1. 各部門のエージェント構成を設計する
-2. ツール選定（Prefect vs LangGraph vs Paperclip等）
-3. Phase 1の実装を開始する（Issue #1から）
+```python
+# 30分cronで同時起動
+async def run_cycle():
+    await asyncio.gather(
+        scan_app.ainvoke(ScanState(...)),    # 新規エントリー探索
+        monitor_app.ainvoke(MonitorState(...)) # 既存ポジション監視
+    )
+```
+
+詳細は `tier1/01_bnf_mean_reversion/spec.md` を参照。
 
 ---
 
