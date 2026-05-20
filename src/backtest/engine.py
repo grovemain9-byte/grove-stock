@@ -16,22 +16,46 @@ import numpy as np
 import pandas as pd
 
 from src.data.cache import CACHE_DB, load_universe, load_bars
+from src.data.db import calc_commission
+from config.strategy_params import DEFAULTS
+
+
+def _trade_cost_pct(entry_price: float, raw_pnl: float, position_size: float,
+                    slippage_bps: float, apply_commission: bool) -> float:
+    """S7: 1取引の往復コストを position_size 比で返す（既定0=無コスト）。
+
+    realistic_baseline._round_trip_cost_pct と同一定義（engineは測定層を
+    import しない方向のため最小複製。立花手数料=calc_commission）。
+    """
+    if entry_price <= 0 or (slippage_bps <= 0 and not apply_commission):
+        return 0.0
+    cost = 0.0
+    if apply_commission:
+        shares = position_size / entry_price
+        exit_price = entry_price * (1.0 + raw_pnl)
+        cost += (calc_commission(entry_price, shares)
+                 + calc_commission(exit_price, shares)) / position_size
+    if slippage_bps > 0:
+        s = slippage_bps / 10_000.0
+        cost += (1.0 + raw_pnl) - (1.0 + raw_pnl) * (1.0 - s) / (1.0 + s)
+    return cost
 
 logger = logging.getLogger("backtest.engine")
 
-# 戦略定数 (CLAUDE.md準拠)
-MA_PERIOD = 25
-RSI_PERIOD = 14
-BB_PERIOD = 25
-BB_STD = 2.0
-RSI_THRESHOLD = 35
-CONSENSUS_MIN = 4  # 2026-04-21: 3→4 (厳選で勝率向上狙い)
-STOP_LOSS = -0.07  # 2026-05-02: 令和式 -5%→-7% (grid best: Sharpe 0.250 +19%)
-MAX_HOLD_DAYS = 15  # 2026-05-02: 令和式 10→15 (grid best: bearish_only+stop=-7%)
-NIKKEI_CODE_YF = "^N225"  # fallback用
+# 戦略定数: S2 で単一ソース DEFAULTS を参照（値は現値と同一＝挙動保存）。
+# module名は据え置き（runner 等が `from engine import MA_PERIOD` 等で参照）。
+MA_PERIOD = DEFAULTS.ma_period
+RSI_PERIOD = DEFAULTS.rsi_period
+BB_PERIOD = DEFAULTS.bb_period
+BB_STD = DEFAULTS.bb_std
+RSI_THRESHOLD = DEFAULTS.rsi_threshold
+CONSENSUS_MIN = DEFAULTS.consensus_min
+STOP_LOSS = DEFAULTS.stop_loss
+MAX_HOLD_DAYS = DEFAULTS.max_hold_days
+NIKKEI_CODE_YF = "^N225"  # 非戦略・fallback用・据え置き
 
 # セクター閾値デフォルト (閾値辞書に無い場合)
-DEFAULT_SECTOR_TH = -0.07
+DEFAULT_SECTOR_TH = DEFAULTS.default_sector_th
 
 
 @dataclass
@@ -90,7 +114,7 @@ class BacktestResult:
 
 
 def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """前処理: close, MA25, RSI14, BB下限, 出来高トレンド。
+    """前処理: close, MA25, RSI14, BB下限, 出来高トレンド, EMA900傾き。
     df must have columns: date, open, high, low, close, volume"""
     d = df.sort_values("date").reset_index(drop=True).copy()
     d["ma25"] = d["close"].rolling(MA_PERIOD).mean()
@@ -107,6 +131,10 @@ def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     d["bb_lower"] = d["bb_mean"] - BB_STD * d["bb_std"]
     # Volume trend (past 3d decreasing)
     d["vol_decreasing"] = (d["volume"].diff(1) < 0) & (d["volume"].diff(2) < 0)
+    # 2026-05-20 本田MTG bridge: EMA900 + 20日傾き (per_stock_uptrend_required=True 時のみ参照)
+    # ewm は O(n)。データ短い時は NaN のまま伝播 → 警戒期 hard-fail で捕捉。
+    d["ema900"] = d["close"].ewm(span=900, adjust=False, min_periods=900).mean()
+    d["ema900_slope_up"] = d["ema900"] > d["ema900"].shift(20)
     return d
 
 
@@ -137,6 +165,13 @@ def run_backtest(
     stop_loss: float = STOP_LOSS,
     max_hold_days: int = MAX_HOLD_DAYS,
     consensus_min: int = CONSENSUS_MIN,
+    p4_required: bool = True,  # 2026-05-12: False で P4 を強制条件から外す（consensus 集計には含む）
+    p4_threshold: float = 0.0,  # P4 の発火閾値 nk_dev < p4_threshold (default 0.0)
+    slippage_bps: float = 0.0,       # S7 opt-in: 片道slippage(bps)。既定0=従来挙動(golden exact)
+    apply_commission: bool = False,  # S7 opt-in: 立花往復手数料を控除。既定False=従来挙動
+    rank_candidates: bool = False,   # ①opt-in: 枠超候補を辞書順でなく原理優先順で選別。既定False=従来挙動exact
+    take_profit_dev: float = 0.0,    # 2026-05-20 本田MTG bridge: 利確閾値 deviation>=take_profit_dev（既定0=従来挙動exact）
+    per_stock_uptrend_required: bool = False,  # 2026-05-20 本田MTG bridge: EMA900上昇時のみエントリ可（既定False=従来挙動exact）
 ) -> BacktestResult:
     """ユニバース全銘柄を対象にPortfolio-level バックテスト。
 
@@ -154,17 +189,42 @@ def run_backtest(
     nikkei = nikkei.set_index("date")
 
     # 各銘柄の指標を事前計算してメモリに保持
+    # 2026-05-20 本田MTG bridge: EMA900上昇ゲート有効時はwarmup確保のため
+    # 履歴を full ロード（start_date無視）→ 指標計算 → 取引窓に truncate
+    _load_start = None if per_stock_uptrend_required else start_date
+    _trade_start_ts = pd.Timestamp(start_date) if (per_stock_uptrend_required and start_date) else None
     logger.info("preparing indicators for %d codes...", len(universe))
     bar_cache: dict[str, pd.DataFrame] = {}
     for _, r in universe.iterrows():
-        df = load_bars(r["Code"], start=start_date, end=end_date)
+        df = load_bars(r["Code"], start=_load_start, end=end_date)
         if len(df) < MA_PERIOD + 5:
             continue
-        bar_cache[r["Code"]] = _compute_indicators(df)
+        df = _compute_indicators(df)
+        if _trade_start_ts is not None:
+            df = df[pd.to_datetime(df["date"]) >= _trade_start_ts].reset_index(drop=True)
+            if len(df) == 0:
+                continue
+        bar_cache[r["Code"]] = df
 
     logger.info("prepared %d bar series", len(bar_cache))
     if not bar_cache:
         return BacktestResult()
+
+    # 2026-05-20 本田MTG bridge: EMA900上昇ゲート有効時の warmup honesty 検証。
+    # 取引窓の初日に有効な ema900_slope_up が存在しない銘柄が大半 → 警戒期不足で hard-fail。
+    # honda_strategy_wf.py:51-52,117-120 と同パターン（trace-before-alarm）。
+    if per_stock_uptrend_required:
+        insufficient = []
+        for code, df in bar_cache.items():
+            valid_slope = df["ema900_slope_up"].notna()
+            if not valid_slope.any():
+                insufficient.append(code)
+        if len(insufficient) >= len(bar_cache) * 0.5:
+            raise RuntimeError(
+                f"insufficient_warmup: {len(insufficient)}/{len(bar_cache)} codes "
+                f"have no valid ema900_slope_up in trade window (need ~920 pre-history bars). "
+                f"5yr cache covers ~Y3 only. Sample missing: {insufficient[:3]}"
+            )
 
     # 全日付集合
     all_dates = sorted(set(d for df in bar_cache.values() for d in df["date"]))
@@ -195,7 +255,7 @@ def run_backtest(
     for today in all_dates:
         today_ts = pd.Timestamp(today).normalize()
         nk_dev = nikkei.loc[today_ts, "nikkei_dev"] if today_ts in nikkei.index else None
-        p4_pass = (nk_dev is not None) and (nk_dev < 0)
+        p4_pass = (nk_dev is not None) and (nk_dev < p4_threshold)
         # レジーム判定 (allowed_regimes指定時)
         if allowed_regimes is not None and nk_dev is not None:
             if nk_dev >= 0.03:
@@ -234,7 +294,7 @@ def run_backtest(
                 reason = "stop_loss"
             elif hold >= max_hold_days:
                 reason = "max_hold"
-            elif not pd.isna(row["deviation"]) and row["deviation"] >= 0:
+            elif not pd.isna(row["deviation"]) and row["deviation"] >= take_profit_dev:
                 reason = "take_profit"
             if reason:
                 trade.exit_date = today
@@ -245,11 +305,17 @@ def run_backtest(
                 to_close.append(code)
         for code in to_close:
             t = open_positions.pop(code)
+            # S7 opt-in: 往復コストを純pnlに反映（既定0=従来挙動 exact）
+            cost_pct = _trade_cost_pct(t.entry_price, t.pnl_pct, position_size,
+                                       slippage_bps, apply_commission)
+            if cost_pct:
+                t.pnl_pct = float(t.pnl_pct - cost_pct)
             closed_trades.append(t)
             balance += position_size * t.pnl_pct
 
         # === entry check ===
         if _allow_entry and len(open_positions) < max_concurrent_positions:
+            _ranked: list = []  # rank_candidates時の候補バッファ
             for code, df in bar_cache.items():
                 if code in open_positions:
                     continue
@@ -272,7 +338,27 @@ def run_backtest(
 
                 # P-F (2026-04-21): P4 (市場レジーム) を必須条件化。
                 # bullish regimeでの逆張り暴走を防ぐ。
-                if consensus >= consensus_min and p4:
+                # 2026-05-12: p4_required=False で必須条件解除（consensus 集計には p4 含む）
+                # 2026-05-20 本田MTG bridge: per_stock_uptrend_required=True なら
+                # 銘柄別EMA900上昇 (slope_up True) を追加 AND 条件として要求
+                entry_ok = (
+                    consensus >= consensus_min
+                    and (p4 or not p4_required)
+                    and (not per_stock_uptrend_required or bool(row.get("ema900_slope_up", False)))
+                )
+                if not entry_ok:
+                    continue
+                if rank_candidates:
+                    # ①ランク選別: 当日全候補を集め原理優先順で上位を採用。
+                    # 流動性=売買代金value（無ければvolume）。tuned重み無し＝
+                    # lexicographic(consensus降→乖離深→流動性高)で過学習回避。
+                    _v = row["value"] if "value" in row.index else None
+                    liq = float(_v) if _v is not None and not pd.isna(_v) \
+                        else float(row["volume"]) if not pd.isna(row.get("volume")) else 0.0
+                    _ranked.append((int(consensus), -float(row["deviation"]),
+                                    liq, code, float(row["close"])))
+                else:
+                    # 従来: 即時建て・辞書順・max到達でbreak（golden exact保存）
                     open_positions[code] = Trade(
                         code=code,
                         entry_date=today,
@@ -281,6 +367,16 @@ def run_backtest(
                     )
                     if len(open_positions) >= max_concurrent_positions:
                         break
+
+            if rank_candidates and _ranked:
+                slots = max_concurrent_positions - len(open_positions)
+                # 原理優先: consensus降 → 乖離深(−dev大) → 流動性高。重み学習しない
+                _ranked.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+                for cons, _ndev, _liq, code, px in _ranked[:max(slots, 0)]:
+                    open_positions[code] = Trade(
+                        code=code, entry_date=today, entry_price=px,
+                        consensus_at_entry=cons,
+                    )
 
         equity_records.append((today, balance + sum(position_size * ((bar_cache[c][bar_cache[c]["date"]==today]["close"].iloc[0] - t.entry_price)/t.entry_price) for c,t in open_positions.items() if not bar_cache[c][bar_cache[c]["date"]==today].empty)))
 
