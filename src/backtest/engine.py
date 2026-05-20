@@ -138,18 +138,38 @@ def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-def _load_nikkei_bars() -> pd.DataFrame:
-    """日経225の履歴をyfinanceで取得（J-Quants Lightはindices未対応）。MA25乖離列付きで返す。"""
-    import yfinance as yf
-    t = yf.Ticker("^N225")
-    df = t.history(period="5y")
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df = df.reset_index()[["Date","Close"]].rename(columns={"Date":"date","Close":"close"})
-    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.date
+def _load_nikkei_bars(end_date: Optional[str] = None) -> pd.DataFrame:
+    """日経225の MA25 乖離を返す。DuckDB cache (nikkei_bars) を優先、cache miss なら yfinance fallback。
+
+    Args:
+        end_date: ISO-8601 ("YYYY-MM-DD"). 指定時は cache をその日以前で切る。
+            未指定なら全期間。characterization test の reproducibility 確保用。
+
+    cache が空 or end_date より cache が古い時のみ yfinance を叩く（moving window 依存）。
+    """
+    from src.data.cache import load_nikkei_bars as _load_cache
+
+    df = _load_cache(end_date=end_date)
+    cache_too_old = False
+    if end_date and not df.empty:
+        cache_max = pd.Timestamp(df["date"].max())
+        target = pd.Timestamp(end_date) - pd.Timedelta(days=14)
+        cache_too_old = cache_max < target
+    if df.empty or cache_too_old:
+        # cache miss or 古すぎる → yfinance fallback (moving window・reproducibility なし)
+        import yfinance as yf
+        t = yf.Ticker("^N225")
+        raw = t.history(period="5y")
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        df = raw.reset_index()[["Date", "Close"]].rename(columns={"Date": "date", "Close": "close"})
+        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.date
+        if end_date:
+            df = df[df["date"] <= pd.Timestamp(end_date).date()]
+    df = df.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)
     df["ma25"] = df["close"].rolling(MA_PERIOD).mean()
     df["nikkei_dev"] = (df["close"] - df["ma25"]) / df["ma25"]
-    return df[["date","nikkei_dev"]].dropna()
+    return df[["date", "nikkei_dev"]].dropna()
 
 
 def run_backtest(
@@ -184,7 +204,8 @@ def run_backtest(
         raise RuntimeError("universe empty. run cache build first.")
 
     # 日経MA25乖離 (indexをpd.Timestamp(normalize)に揃える)
-    nikkei = _load_nikkei_bars()
+    # end_date 指定時は cache を切って固定 window で取得（reproducibility 確保）
+    nikkei = _load_nikkei_bars(end_date=end_date)
     nikkei["date"] = pd.to_datetime(nikkei["date"])
     nikkei = nikkei.set_index("date")
 
@@ -214,15 +235,19 @@ def run_backtest(
     # 取引窓の初日に有効な ema900_slope_up が存在しない銘柄が大半 → 警戒期不足で hard-fail。
     # honda_strategy_wf.py:51-52,117-120 と同パターン（trace-before-alarm）。
     if per_stock_uptrend_required:
+        # NOTE: ema900_slope_up は `ema900 > ema900.shift(20)` の比較結果で、pandas は
+        # NaN同士の比較を False に解決する。よって警戒期中の行は False (NaN ではない)
+        # で埋まり、`ema900_slope_up.notna().any()` は常に True を返してしまう。
+        # ema900 自体の NaN を見ることで「警戒期不足」を正しく検出する。
         insufficient = []
         for code, df in bar_cache.items():
-            valid_slope = df["ema900_slope_up"].notna()
+            valid_slope = df["ema900"].notna()
             if not valid_slope.any():
                 insufficient.append(code)
         if len(insufficient) >= len(bar_cache) * 0.5:
             raise RuntimeError(
                 f"insufficient_warmup: {len(insufficient)}/{len(bar_cache)} codes "
-                f"have no valid ema900_slope_up in trade window (need ~920 pre-history bars). "
+                f"have no valid ema900 in trade window (need ~900 pre-history bars). "
                 f"5yr cache covers ~Y3 only. Sample missing: {insufficient[:3]}"
             )
 

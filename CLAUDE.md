@@ -95,4 +95,8 @@ python src/broker/tachibana.py --test  # デモAPI疎通
 
 ## これまでの失敗の記録
 
-- （実装開始後に追記する）
+- pandas-taはpipで取得不可。taライブラリ（pip install ta）を使う
+- spec.mdのpandas-ta記載はtaライブラリと読み���えること
+- J-Quants Freeプランは当日データ取得不可。Lightプラン（¥1,650/月）以上が必要
+- yfinanceは当日未確定データでNaN行を返す。dropna(subset=["close"])が必要
+- pytestはweb3プラグインがグローバルに入っており、PYTEST_DISABLE_PLUGIN_AUTOLOAD=1が必須

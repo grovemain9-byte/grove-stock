@@ -677,3 +677,262 @@ G (regime-stratified Δ): Honda 3候補とも uniform-improvement なし。
 - **Grove の「何が最適だと思うか」には sequential-thinking + deep_research +
   Plan agent の 3並列で対応せよ**: フロンティア設計領域では menu や即答でなく
   研究接地が常に勝つ（feedback_frontier_design_research）
+
+---
+
+## 2026-05-20: decision_shadow 配線実装（LIVE A/B 記録機構稼働開始）
+
+### 経緯
+前回 session 終盤に「`decision_shadow` table = 0 records」を発見。regime_filter LIVE A/B（hypothesis_shadow id=7, verdict=GO, applied=false）の評価記録が物理的に accumulate されていない可能性。今 session でこれを最優先で解明。
+
+### 真因（3並列 Explore で断定）
+- `decision_shadow.record_proposal()` の **本番コード上の呼び出しが完全にゼロ**。テスト（test_measurement.py）にしか呼び出しがない。
+- `backfill_counterfactuals()` は cron 15:45 hb_learning --daily で正常稼働しているが、UPDATE 対象行が無い（INSERT が無いため）。
+- 結果: kelly_node の go/pass 判定が DB に残らず、kill-gate（2026-09-30）も consensus-tighten LIVE A/B（2026-11-30）も評価不能。
+
+### 実装
+- `src/main.py` kelly_node:
+  - 同時保有上限 early return の **前** に consensus≥3 全 ticker を `max_concurrent_full` reason で pass 記録（A/B評価のため）
+  - ループ内: regime_filter_skip / already_open / no_market_data / kelly_ok / shares_zero の 5 経路で record_proposal を発火
+  - slots_full break は記録しない（A/B 比較と無関係）
+- `src/voting.py`: vote_all の返り値に `votes["dev"] = ma25_dev` を追加。kelly_node 側で `edge` フィールドに使用
+- `tests/test_scan_graph.py`: `TestDecisionShadowWiring` クラス 5 ケース追加（go / regime_filter_pass / multibook 同 ticker / max_concurrent_full / consensus<3 not recorded）
+
+### 検証結果（実測）
+| 指標 | Before | After |
+|---|---|---|
+| decision_shadow 総件数 | 0 | 990 (= 198 シグナル × 5 books) |
+| edge 埋まり率 | N/A | 100% (990/990) |
+| consensus 分布 (go予備) | N/A | c=3: 590 / c=4: 340 / c=5: 60 |
+| pytest test_voting/test_scan_graph/test_measurement | 33/33 | 38/38（5 ケース増） |
+| Golden test_c3_baseline_frozen_g3 | 901 vs 555 fail | 同（pre-existing fragility・本変更と無関係） |
+
+### 想定外の発見と訂正
+- **当初仮説「monitor exit 未発火で 35件 stuck」は誤りだった**。実測で:
+  - 過去30日 exit 27件（signal_reversal 24 + stop_loss 3、avg pnl +¥28,855、平均 hold 1.7日）
+  - 5/17 entry 17件 → 既に 14件 closed（残 3）/ 5/18 entry 14件 → 既に 10件 closed（残 4）
+  - 本日 5/20 で 27件 fresh entry = システムは active に取引
+  - **monitor は完全に正常稼働。35件は直近3-4営業日の正常な蓄積（hold 1.7日 × 5book × 7枠 ≈ 35）**
+- **decision_shadow 0 records の真因も別だった**: max_concurrent_full は本日午後の手動 paper run でだけ発生。本日 9時 cron では旧コード（record_proposal 未配線）で 27件 entry されたため記録ゼロ。私の修正が 12:30 過ぎに deploy されたので、それ以降の手動 paper run では既に枠埋まりで max_concurrent_full のみ記録された
+- **明日朝 9時 cron 以降が真の稼働開始**: 新コードで枠空き状態から kelly_node に到達 → kelly_ok / shares_zero / regime_filter_skip / already_open / no_market_data の全 reason で記録が始まる
+- **feedback_no_hypothesis_as_fact_discovery 違反**: 前 session で「decision_shadow=0 → LIVE A/B 未稼働」と書き、本 session で「max_concurrent_full → monitor exit 未発火」と更に断定した。両方とも仮説を事実として fixate していた。各 step で `positions WHERE status='open'` の entry_date 分布と `exit_reason` 分布を grep する trace を最初にやるべきだった
+
+### 教訓
+- **LIVE A/B「未稼働」と「未配線」は別問題**: hypothesis_shadow が GO/applied=false でも、それは「DEFAULTS を flip しないという規律」を意味するだけで、**判断記録の配線抜け** を含意しない。前回 session で「decision_shadow 0 = LIVE A/B が動いてない」と書いたが、実態は「配線が無い」だった。検査の解像度を「テーブル空 → 何が呼ばれていないか grep」まで落とすべきだった
+- **早期 return パスも記録対象**: 当初の Plan では「max_concurrent (枠制約) は A/B 無関係なので記録しない」と書いた。しかし実態は **全 book が枠埋まり** → 早期 return → ループに到達せず → 全シグナル記録漏れ。「枠制約は無関係」は理論上正しいが、現状の system state では「枠制約しか効いていない」ため、ここを記録しないと A/B が走り出すまで decision_shadow が空のままになる。実測が plan を上書きした例
+- **voting 出力に `dev` を追加するだけで A/B stratification の解像度が大きく上がる**: 既存 scans テーブルには ma25_dev が記録されていたが kelly_node には伝達されておらず edge=None になっていた。1 行追加で 990 行すべての edge が埋まり、consensus stratification と組み合わせて F audit 副産物（c=3 noise / c=4 edge / c=5 strong）の検証が可能になる
+
+### 次に同じことをする人へ
+- decision_shadow に行が入り始めたので、明日以降の hb_learning --daily cron が cf_* を埋め始める。**1 週間ほど待ってから集計を回せ**（cf_exit_date が exit_rule で確定するまで時間が必要）
+- 集計時は `(ticker, decided_date, consensus)` で control（p1m/p10m/p50m）と treatment（p5m/p30m）を JOIN し、`regime_filter_skip` と `kelly_ok/shares_zero/max_concurrent_full` の cf_pnl_pct 分布を比較せよ
+- **monitor exit 発火問題 を先に解決すべし**（前 session Next #1 の派生）: 35 件 stuck positions が close しない限り全 book が max_concurrent_full のままになり、本来の go / regime_filter_pass の比較ができない
+- **冪等性なし**: 同日2回 main.py 実行で 2 倍記録される。cron 1日1回前提だが、将来 UNIQUE 制約を別 Issue で追加すべき
+
+---
+
+## 2026-05-20 (続): ema900 guard fix + G3 fragility partial fix
+
+### ema900 warmup guard bug fix（完了）
+- `src/backtest/engine.py:219` — `df["ema900_slope_up"].notna()` → `df["ema900"].notna()`。
+  pandas が NaN比較を False に解決する仕様で、警戒期中の slope 列が bool で埋まり
+  guard が発火しない bug を修正。
+- `tests/test_backtest.py` — `test_ema900_slope_up_returns_bool_not_nan_in_warmup`
+  追加（regression test として pandas semantics と guard 意図を pin）
+- 検証: hypothesis_loop 再走で **Y1 = "insufficient_warmup"** sentinel が正しく
+  発火（前回 "no_data" だったのが明示記録に）。regime_filter は 3/3 GO で前回と
+  整合（前回 verdict 不変）
+
+### G3 golden test fragility fix（**partial・root cause 残り**）
+- `src/backtest/runner.py:22` — `compute_sector_thresholds_from_cache` に
+  `as_of_date` 引数を追加。`load_bars(end=as_of_date)` で過去固定
+- `tests/test_characterization.py:178` — `as_of_date=self.BASELINE_END` を渡す
+- **検証結果**: 依然 901 vs 555 で fail。sector_thresholds 部分は drift から
+  保護されたが、trade-count drift の **真の root cause は別**だった
+- 想定 root cause:
+  - `universe_snapshot` table が時系列で再生成されている可能性
+  - `daily_quotes` 過去 bar が後日 update（株式分割訂正等）されている可能性
+  - `_load_nikkei_bars()` が end_date を受けず Nikkei MA25 が drift する可能性
+- 深掘りには cache audit が必要で別セッション。Out of Scope に降格
+
+### 教訓
+- **fragility fix は「容疑1つを潰して PASS にならなければ、その容疑は主因ではない」**: sector_thresholds drift を疑って fix したが test は依然 fail → 主因は別所。確信度の低い修正は「PASS を試金石にして容疑を消す」プロセス
+- **as_of_date 引数の追加自体は害は無い**（既存呼び出しに影響しない default=None）。次セッションで root cause が判明したらこの引数も使い続ければよい
+- **Plan handoff §9 の「5min」見積もりは過小**だった。前 session で「sector_thresholds drift」と原因を断定していたが、それは仮説に過ぎなかった（feedback_no_hypothesis_as_fact_discovery）
+
+---
+
+## 2026-05-20 (続2): G3 root cause 実測ベース究明（feedback_debug_trace_before_root_cause 適用）
+
+### 経緯
+新規 feedback memory `feedback_debug_trace_before_root_cause` に従い、G3 trade-count drift の真の root cause を実測ファーストで究明。「事実→仮説→検証→断定」の順を厳守。
+
+### 仮説 4 候補と実測検証
+| # | 仮説 | 実測 | 判定 |
+|---|------|------|------|
+| 1 | universe_snapshot が時系列で増加 → trades 増 | `SELECT count(*) FROM universe_snapshot` = 1337 (安定) | **deny** |
+| 2 | daily_quotes の過去 bar 後日 update (mutation) | 5/15時点 1773177 rows / 現在 1775850 rows (差分 4営業日分のみ) | minor |
+| 3 | `_load_nikkei_bars()` の `period="5y"` が moving window で reproducibility なし | コード読了で確認、yfinance に依存 | **strong suspect** |
+| 4 | sector_thresholds 修正が無効化されてる | as_of_date あり vs なしを比較、30/32 sectors で diff < 0.01% | **minor impact** |
+
+### Nikkei fix 試行 → ロールバック
+- `_load_nikkei_bars(end_date)` を実装し `t.history(start="2021-01-01", end=end_date)` で固定 window 化
+- 検証実行で yfinance が `^N225: possibly delisted; no price data found` エラー → fetch failure
+- **ロールバック**: 本番 cron での Nikkei 取得を壊さないため moving window に戻した（コメントで「真の解決には DuckDB 永続 cache が必要」と明示）
+
+### 暫定状態
+- `as_of_date` 引数（runner.py + test_characterization.py）は **keep**: 副作用なく minor improvement
+- G3 test は依然 `901 vs 555` で fail
+- **真の root cause は仮説 3 (Nikkei moving window)** が最有力だが、yfinance API 制約で固定 window 化できず
+
+### Out of Scope（別セッション）
+- Nikkei bar の DuckDB 永続 cache 化（`nikkei_bars` table 新規作成 → `_load_nikkei_bars(end_date)` で SELECT）
+- 仮説 3 が解消された後も fail なら、daily_quotes 過去 bar mutation の audit が次容疑
+
+### 教訓
+- **feedback_debug_trace_before_root_cause が早速効いた**: 仮説 4 つを列挙し並列で実測 → 主因の絞り込みに成功（前 session のように「sector_thresholds が原因」と即断定しなかった）
+- **fix 試行で本番を壊しかけたら即ロールバック**: yfinance fetch failure を見た瞬間に「reproducibility 改善目的の修正が本番 cron 障害を引き起こす」と判断、即ロールバックした
+- **「修正で PASS にならなければ容疑を消す」プロセスが機能した**: sector_thresholds → as_of_date 修正後も fail → 主因ではない、と確定できた
+
+---
+
+## 2026-05-20 (続3): Nikkei DuckDB 永続 cache 化 → 仮説3 deny
+
+### 実装
+- `src/data/cache.py` — `nikkei_bars (date PRIMARY KEY, close DOUBLE)` テーブル追加、`fetch_and_cache_nikkei(years=5)` で yfinance→ INSERT OR REPLACE、`load_nikkei_bars(end_date)` で SELECT
+- `src/backtest/engine.py:141` — `_load_nikkei_bars(end_date)` が cache 優先で読む。cache miss or 14日以上古ければ yfinance fallback。型ミスマッチ (Timestamp vs date) も pd.Timestamp で揃えて修正
+- 初回 backfill: **1222 rows** (2021-05-20 〜 2026-05-20)
+
+### G3 仮説3 検証結果: **deny**
+- Nikkei cache 経由で `end_date="2026-05-15"` 固定 window 化したが test_c3_baseline_frozen_g3 は依然 **901 vs 555**
+- **Nikkei moving window は drift の主因ではなかった**
+- 残る strong suspect: 仮説2 (`daily_quotes` 過去 bar mutation) — 直接検知には過去 cache の snapshot との比較が必要で本 session scope を超える
+
+### 副次的 benefit (keep する理由)
+- yfinance API 障害時の reproducibility 確保（cache 経由で安定）
+- 本番 cron の Nikkei fetch 回数削減（cache hit で yfinance 呼び出し回避）
+- 将来 daily_quotes mutation の真相究明時に Nikkei 部分は固定済みなので測定が容易
+
+### Regression test
+- pytest test_voting + test_scan_graph + test_measurement + test_backtest: **41/41 全 PASS**
+- Nikkei cache 化が既存テストの挙動を変えていないことを確認
+
+### 教訓
+- **「修正で PASS にならなければ容疑を消す」プロセスが再度機能**: Nikkei cache 化しても 901 のまま → 仮説3 deny。これで残る容疑は1つに絞れた
+- **副作用なしの fix は keep**: 主因究明には繋がらなくても、reproducibility 改善や本番安定化に寄与するなら keep する（Nikkei cache 化が好例）
+- **次セッションで daily_quotes mutation audit**: 5/15 baseline 時点の bar 状態を再現する snapshot が無いので、現時点 cache を「snapshot ファイル」として dump → 後日比較できるようにしておくべき
+
+---
+
+## 2026-05-20 (続4): G3 test 901 vs 555 の **真の root cause 確定** （commit 8af3315 内の p4_required semantics 変更）
+
+### 発見
+仮説 1-4 全部 deny → 仮説 5「test 設計時 (5/17) と現在 (5/20) の間の git commit 確認」で answer 確定。
+
+git log で 5/15 以降 backtest engine への commit は **8af3315 のみ**。commit 内 diff:
+
+```diff
+- if consensus >= consensus_min and p4:
++ entry_ok = (consensus >= consensus_min
++             and (p4 or not p4_required)
++             and (not per_stock_uptrend_required or bool(row.get("ema900_slope_up", False))))
++ if not entry_ok: continue
+```
+
+### Semantics 変化
+| 呼び出し | 旧 entry 条件 | 新 entry 条件 |
+|---|---|---|
+| 既定 | `consensus≥3 AND p4` | `consensus≥3 AND p4` (p4_required default=True で同じ) |
+| **test_c3 (`p4_required=False`)** | `consensus≥3 AND p4` (旧は引数不在) | **`consensus≥3` のみ** (p4 が無視される) |
+
+→ test_c3 が `p4_required=False` で呼ぶことで、entry 条件から p4 が消え trade 数が急増 (555 → 901)。
+
+### 前 session の誤認
+handoff §6/§8 で「pre-existing test fail: test_c3_baseline_frozen_g3 901 vs 555 (cache drift)」とラベル → **誤り**。cache drift ではなく commit 8af3315 内の意図しない semantics 変更だった。前 session 自体が commit でこれを起こしたが、handoff 時点で「conditional overlay 安全パターン」「golden を壊さなかった」と書いており、test_c3 への影響を見落としていた。
+
+### 仮説検証の旅 (まとめ)
+- 仮説1 (universe): deny（1337 安定）
+- 仮説2 (daily_quotes mutation): mutation 0（snapshot vs cache 全一致）
+- 仮説3 (Nikkei moving window): deny（cache 化しても 901 のまま）
+- 仮説4 (sector_thresholds 修正効いてない): minor impact（30/32 sectors diff < 0.01%）
+- **仮説5 (commit semantics 変更): CONFIRM**
+
+### 判断保留 (要 Grove)
+3つの選択肢:
+A. test 期待値を新 baseline (901 trades) に更新 — 「semantics 変更は intentional だった、旧値は obsolete」
+B. commit 8af3315 を partial revert — `p4_required` 引数を削除し旧挙動に戻す（影響範囲大・honda bridge 機能損失）
+C. test 呼び出しを `p4_required=True` に変更 — 旧 semantics を再現（test の意図に合致？）
+
+Grove に状況報告して判断を仰ぐべき。
+
+### feedback_debug_trace_before_root_cause の価値
+仮説4つを実測で deny した後、最後の仮説5「git log」で 1 commit を発見。**「修正で PASS にならなければ容疑を消す」プロセスを最後まで貫いて、真因に到達できた**。前 session のように「cache drift」で fixate していたら永久に主因を見逃していた。
+
+---
+
+## 2026-05-20 (続5): G3 baseline 新値で pin (901 trades) — Grove 選択肢 A 採用
+
+### 変更
+- `tests/test_characterization.py:170-198` — test_c3_baseline_frozen_g3 の全 expected を新 baseline で pin:
+  - total_trades: 555 → **901**
+  - closed: 548 → **894**
+  - wins/losses: 290/258 → **482/412**
+  - win_rate: 0.5291... → 0.5391...
+  - avg_return: 0.0045... → 0.00241...
+  - sharpe_per_trade: 0.0492 → **0.0287**（コスト後・新 entry 条件下）
+  - max_drawdown: -0.2877 → **-0.2649**
+  - exit_reasons: {tp:246, sl:169, hold:133} → {tp:412, sl:267, hold:215}
+- `tests/test_characterization.py:107-122` — test_bearish/bullish_regime_golden で `votes["dev"]` schema 拡張に対応（dev を separately 検証、コア assertion は dict 比較から除外）
+- BASELINE_END=2026-05-15 + as_of_date 経由で sector_thresholds と Nikkei cache の drift 保護を keep
+
+### 検証
+- `pytest tests/test_characterization.py`: **17/17 PASS**
+- `pytest tests/`: 230/232 PASS（2件 fail は cron で走行中の `main.py --paper` (PID 8356) との DuckDB lock 競合、私の修正と無関係）
+
+### 経済的意味（参考）
+新 baseline (p4_required=False = p4 を緩和) では:
+- trades 量は +62%（555 → 901、p4 無視で entry 機会増）
+- win_rate は微増（52.9% → 53.9%）
+- **avg_return は -46%**（0.45% → 0.24%/trade、p4 緩和で質の悪い trade も混入）
+- sharpe_per_trade は -42%（0.049 → 0.029）
+→ p4_required=False は「量増えても質落ちる」を確認。本田 MTG bridge の改善余地と整合。
+
+### 教訓
+- **「pre-existing fragility」と diagnose した時こそ、自分の commit を疑う**: 前 session で「cache drift」とラベルしていたが、実際は自分の commit 8af3315 内の semantics 変更。Plan handoff §11 の成長スコア 12/12 中、ema900 warmup guard の bug を「verdict 不変だから影響なし」と判断したが、**同じ commit 内で test_c3 を壊す変更も入っていた**ことに気付かなかった。次回からは「conditional overlay 完了」と言う前に、既存の characterization test 全部を `p4_required=False` 等の non-default 引数で確実に通すこと
+- **A 選択 (test 更新) が正解だった理由**: B (revert) では honda bridge の機能損失、C (`p4_required=True`) では旧 semantics と不一致で test の意図がぶれる。A は「新 semantics 下で realistic baseline を pin」という characterization test の本来の意義に合致
+
+---
+
+## 2026-05-20 (続6): decision_shadow UNIQUE 制約導入（冪等性確保）
+
+### 実測（実装前）
+- 総 1991 行 / unique 1001 → **990 行の重複**
+- 12:50 (手動 paper run) + 15:00 (cron 15時 scan) で同 (ticker, book, decided_date) ペアが 2 回記録
+- 1日 3 回 scan (9時/12時/15時) で最大 3 倍記録される設計欠陥
+
+### 実装
+- `src/measurement/decision_shadow.py:30-49` — schema に `UNIQUE (ticker, book, decided_date)` 追加
+- `src/measurement/decision_shadow.py:record_proposal()` — INSERT → **ON CONFLICT DO UPDATE**。
+  cf_* 系列は backfill_counterfactuals が別途埋めるため UPDATE 対象外
+- `scripts/migrate_decision_shadow_unique.py` — 既存 DB の 1回限り migration:
+  1. 重複行 dedupe (最新 id を残す)
+  2. 新 table 作成 (UNIQUE 制約付き) → INSERT SELECT → DROP/RENAME
+  3. id seq を max_id+1 に reset
+  4. 冪等: 既に UNIQUE があれば skip
+- `tests/test_measurement.py` — 2 ケース追加:
+  - `test_record_proposal_is_idempotent_on_same_key`: 同 key 2 回呼びで 1 行のみ、最新値が残る
+  - `test_record_proposal_different_book_separately_stored`: 同 ticker × 同 date でも book 違えば別行
+
+### 検証
+- migration 実行: **1991 → 1001 rows (990 重複削除)** + UNIQUE 制約 enabled
+- pytest test_measurement + test_scan_graph: **29/29 PASS** (新規 2 件含む regression なし)
+- DB query で UNIQUE constraint 検出: `UNIQUE(ticker, book, decided_date)` 有効
+
+### 意味論（同日内の判断遷移）
+ON CONFLICT DO UPDATE で「最新の判断」を残す設計。同日内で position 状態が変わる場合の例:
+- 9時 scan: kelly_ok で entry → `decision=go, council_reason=kelly_ok`
+- 12時 scan: 既に open position → `decision=pass, council_reason=already_open` (新値)
+- → 最終的に DB に残るのは 12時の判断 (実態と一致)
+
+### 教訓
+- **「冪等性」を後付けすると migration が必要になる**: 最初から UNIQUE 制約を入れていれば row id seq の reset 等の手間は不要。新規 table 設計時に「同日複数回呼ばれる前提」を考えて key 設計すべき
+- **schema 変更 + migration script + idempotent flag は組合せる**: migration を `_connect()` で毎回走らせるとコスト高 → 別 script + `duckdb_constraints()` で既に存在チェック (冪等)
