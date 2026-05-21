@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS decision_shadow (
     cf_pnl_pct    DOUBLE,
     cf_won        BOOLEAN,
     cf_computed_at TIMESTAMP,
+    -- v2 (Phase 0+ EVS/PLT 2026-05-21): 10 features + router provenance
+    evs_total       DOUBLE,
+    cell_id         VARCHAR,
+    cap_pct_recommended DOUBLE,
+    cap_pct_actual  DOUBLE,
+    sizing_source   VARCHAR,
+    cell_n_samples  INTEGER,
+    cell_confidence VARCHAR,
+    exploration_flag BOOLEAN,
+    -- 10 feature values (JSON for forward-compat, also indexed cols for SQL)
+    evs_components_json TEXT,
     UNIQUE (ticker, book, decided_date)
 )
 """
@@ -69,6 +80,16 @@ def record_proposal(
     edge: float | None = None,
     council_reason: str = "",
     db_path: str | None = None,
+    # v2 (Phase 0+ EVS/PLT) — all optional for backward compat
+    evs_total: float | None = None,
+    cell_id: str | None = None,
+    cap_pct_recommended: float | None = None,
+    cap_pct_actual: float | None = None,
+    sizing_source: str | None = None,
+    cell_n_samples: int | None = None,
+    cell_confidence: str | None = None,
+    exploration_flag: bool | None = None,
+    evs_components_json: str | None = None,
 ) -> int:
     """council の go/pass 提案を1行記録（cf_* は未確定=NULL）。
 
@@ -77,6 +98,8 @@ def record_proposal(
     判断が遷移するケース (例: 朝 kelly_ok → 12時 already_open) を正しく反映する。
     cf_* は backfill_counterfactuals が別途埋めるため UPDATE 対象外。
 
+    v2 (2026-05-21): EVS/PLT サイジングメタデータも保存。後付け学習・
+    exploration evaluation のため全 feature を JSON でも保存。
     Returns: 該当行の id。
     """
     if decision not in ("go", "pass"):
@@ -86,13 +109,28 @@ def record_proposal(
         con.execute(
             "INSERT INTO decision_shadow "
             "(decided_at,decided_date,ticker,book,decision,proposed_yen,"
-            "consensus,edge,council_reason) VALUES (?,?,?,?,?,?,?,?,?) "
+            "consensus,edge,council_reason,"
+            "evs_total,cell_id,cap_pct_recommended,cap_pct_actual,"
+            "sizing_source,cell_n_samples,cell_confidence,exploration_flag,"
+            "evs_components_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (ticker, book, decided_date) DO UPDATE SET "
             "decided_at=EXCLUDED.decided_at, decision=EXCLUDED.decision, "
             "proposed_yen=EXCLUDED.proposed_yen, consensus=EXCLUDED.consensus, "
-            "edge=EXCLUDED.edge, council_reason=EXCLUDED.council_reason",
+            "edge=EXCLUDED.edge, council_reason=EXCLUDED.council_reason, "
+            "evs_total=EXCLUDED.evs_total, cell_id=EXCLUDED.cell_id, "
+            "cap_pct_recommended=EXCLUDED.cap_pct_recommended, "
+            "cap_pct_actual=EXCLUDED.cap_pct_actual, "
+            "sizing_source=EXCLUDED.sizing_source, "
+            "cell_n_samples=EXCLUDED.cell_n_samples, "
+            "cell_confidence=EXCLUDED.cell_confidence, "
+            "exploration_flag=EXCLUDED.exploration_flag, "
+            "evs_components_json=EXCLUDED.evs_components_json",
             [datetime.now(), decided_date, ticker, book, decision,
-             proposed_yen, consensus, edge, council_reason],
+             proposed_yen, consensus, edge, council_reason,
+             evs_total, cell_id, cap_pct_recommended, cap_pct_actual,
+             sizing_source, cell_n_samples, cell_confidence, exploration_flag,
+             evs_components_json],
         )
         rid = con.execute(
             "SELECT id FROM decision_shadow "

@@ -19,8 +19,14 @@ from src.kelly import kelly_size
 from src.broker.tachibana import BrokerBase, MockTachibanaClient
 from src.data.db import get_connection, calc_commission, book_account
 from src.measurement.decision_shadow import record_proposal
+from src.sizing.evs import compute_evs, EVSComponents
+from src.sizing.router import decide_cap, shares_from_decision, SizingDecision
 from config.books import BOOKS, LEGACY_BOOK
+from config.sector_config import get_threshold
 from config.strategy_params import DEFAULTS
+
+import json
+import math
 
 logger = logging.getLogger("scan_graph")
 
@@ -156,6 +162,189 @@ def voting_node(state: ScanState) -> dict:
 MAX_CONCURRENT_POSITIONS = DEFAULTS.max_concurrent  # S3: 単一ソース参照（現値7と同一）
 
 
+# --- Phase 0+ EVS/PLT helpers (2026-05-21) ---
+
+def _extract_indicators(df) -> dict:
+    """df から RSI(14), BB lower(25,2), volumes, realized_vol_20d, avg_volume_20d を抽出.
+
+    返り値はすべて None セーフ。指標計算失敗時は該当キーに None。
+    """
+    import pandas as pd
+    out: dict = {
+        "rsi": None,
+        "bb_lower": None,
+        "close": None,
+        "volumes_3day": None,
+        "realized_vol_20d": None,
+        "avg_volume_20d": None,
+    }
+    if df is None or len(df) < 25:
+        return out
+    try:
+        close = df["close"].astype(float)
+        out["close"] = float(close.iloc[-1])
+        # RSI(14)
+        try:
+            import ta.momentum
+            rsi_series = ta.momentum.RSIIndicator(close, window=DEFAULTS.rsi_period).rsi()
+            v = rsi_series.iloc[-1]
+            if not pd.isna(v):
+                out["rsi"] = float(v)
+        except Exception:
+            pass
+        # BB(25, 2)
+        try:
+            import ta.volatility
+            bb = ta.volatility.BollingerBands(
+                close, window=DEFAULTS.bb_period, window_dev=DEFAULTS.bb_std,
+            )
+            lower = bb.bollinger_lband().iloc[-1]
+            if not pd.isna(lower):
+                out["bb_lower"] = float(lower)
+        except Exception:
+            pass
+        # Volumes
+        if "volume" in df.columns and len(df) >= 3:
+            volume = df["volume"].astype(float)
+            try:
+                v3, v2, v1 = float(volume.iloc[-3]), float(volume.iloc[-2]), float(volume.iloc[-1])
+                out["volumes_3day"] = (v3, v2, v1)
+            except Exception:
+                pass
+            if len(volume) >= 20:
+                try:
+                    out["avg_volume_20d"] = float(volume.tail(20).mean())
+                except Exception:
+                    pass
+        # Realized vol (20d, annualized)
+        if len(close) >= 21:
+            try:
+                rets = close.pct_change().dropna().tail(20)
+                if len(rets) >= 5:
+                    out["realized_vol_20d"] = float(rets.std() * math.sqrt(252))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def _sector_winrate_from_db(db_path: str | None, sector: str) -> tuple[int, int]:
+    """sector 別の (n_wins, n_losses) を positions(closed) から集計.
+
+    sector="other" の場合は全 closed の集計 (母集団 prior 代わり)。
+    """
+    from src.sizing.plt import TICKER_SECTORS
+    try:
+        con = get_connection(db_path)
+        try:
+            if sector == "other":
+                rows = con.execute(
+                    "SELECT exit_price, entry_price FROM positions "
+                    "WHERE status='closed' AND exit_price IS NOT NULL AND entry_price > 0"
+                ).fetchall()
+            else:
+                # sector に該当する ticker のみ
+                target_tickers = [t for t, s in TICKER_SECTORS.items() if s == sector]
+                if not target_tickers:
+                    return 0, 0
+                placeholders = ",".join("?" * len(target_tickers))
+                rows = con.execute(
+                    f"SELECT exit_price, entry_price FROM positions "
+                    f"WHERE status='closed' AND exit_price IS NOT NULL "
+                    f"AND entry_price > 0 AND ticker IN ({placeholders})",
+                    target_tickers,
+                ).fetchall()
+        finally:
+            con.close()
+        wins = sum(1 for ex, en in rows if ex > en)
+        losses = sum(1 for ex, en in rows if ex <= en)
+        return wins, losses
+    except Exception:
+        return 0, 0
+
+
+def _held_sectors_count(held_tickers: set[str]) -> dict[str, int]:
+    """open positions の sector ヒストグラム."""
+    from src.sizing.plt import assign_sector
+    counts: dict[str, int] = {}
+    for t in held_tickers:
+        s = assign_sector(t)
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+def _build_evs_for_record(
+    *,
+    ticker: str,
+    df,
+    vote_result: dict,
+    nikkei_ma25_dev: float | None,
+    held_tickers: set[str],
+    db_path: str | None,
+) -> EVSComponents | None:
+    """EVS を計算 (record_proposal v2 引数用). df が None / 不足なら None."""
+    from src.sizing.plt import assign_sector
+    ind = _extract_indicators(df)
+    if ind["close"] is None:
+        return None
+    sector = assign_sector(ticker)
+    wins, losses = _sector_winrate_from_db(db_path, sector)
+    return compute_evs(
+        consensus=vote_result.get("consensus", 0),
+        actual_dev=vote_result.get("dev"),
+        sector_threshold=get_threshold(ticker),
+        rsi=ind["rsi"],
+        close=ind["close"],
+        bb_lower=ind["bb_lower"],
+        volumes_3day=ind["volumes_3day"],
+        sector_wins=wins,
+        sector_losses=losses,
+        nikkei_ma25_dev=nikkei_ma25_dev,
+        realized_vol_20d=ind["realized_vol_20d"],
+        avg_volume_20d=ind["avg_volume_20d"],
+        target_ticker=ticker,
+        target_sector=sector,
+        held_tickers=held_tickers,
+        held_sectors=_held_sectors_count(held_tickers),
+    )
+
+
+def _record_with_evs(
+    *,
+    ticker: str,
+    decision: str,
+    today: date,
+    book: str | None,
+    consensus: int,
+    edge: float | None,
+    council_reason: str,
+    db_path: str | None,
+    proposed_yen: float | None = None,
+    evs_comp: EVSComponents | None = None,
+    sizing_decision: SizingDecision | None = None,
+) -> None:
+    """record_proposal の v2 ラッパー — EVS と router decision の有無に応じて記録."""
+    kwargs: dict = dict(
+        ticker=ticker, decision=decision, decided_date=today,
+        book=book, consensus=consensus, edge=edge,
+        council_reason=council_reason, db_path=db_path,
+        proposed_yen=proposed_yen,
+    )
+    if evs_comp is not None:
+        kwargs["evs_total"] = evs_comp.evs_total
+        kwargs["cap_pct_recommended"] = evs_comp.cap_pct
+        kwargs["evs_components_json"] = json.dumps(evs_comp.as_dict())
+    if sizing_decision is not None:
+        kwargs["cell_id"] = sizing_decision.cell_id
+        kwargs["cap_pct_actual"] = sizing_decision.cap_pct
+        kwargs["sizing_source"] = sizing_decision.source
+        kwargs["cell_n_samples"] = sizing_decision.cell_n_samples
+        kwargs["cell_confidence"] = sizing_decision.cell_confidence
+        kwargs["exploration_flag"] = sizing_decision.exploration_flag
+    record_proposal(**kwargs)
+
+
 def kelly_node(state: ScanState) -> dict:
     """コンセンサス≥3 + 同時保有上限でKellyサイジング。
 
@@ -202,6 +391,7 @@ def kelly_node(state: ScanState) -> dict:
 
     today = date.today()
     market_data = state.get("market_data", {})
+    nikkei_ma25_dev = state.get("nikkei_ma25_dev")
 
     # 同時保有上限チェック
     open_count = len(existing_tickers)
@@ -212,11 +402,18 @@ def kelly_node(state: ScanState) -> dict:
             consensus = vote_result.get("consensus", 0)
             if consensus < CONSENSUS_THRESHOLD:
                 continue
+            df = market_data.get(ticker)
+            evs_comp = _build_evs_for_record(
+                ticker=ticker, df=df, vote_result=vote_result,
+                nikkei_ma25_dev=nikkei_ma25_dev,
+                held_tickers=existing_tickers, db_path=db_path,
+            )
             try:
-                record_proposal(
-                    ticker=ticker, decision="pass", decided_date=today,
+                _record_with_evs(
+                    ticker=ticker, decision="pass", today=today,
                     book=book, consensus=consensus, edge=vote_result.get("dev"),
                     council_reason="max_concurrent_full", db_path=db_path,
+                    evs_comp=evs_comp,
                 )
             except Exception as e:
                 errors.append(f"decision_shadow:{ticker}:{e}")
@@ -224,6 +421,13 @@ def kelly_node(state: ScanState) -> dict:
 
     slots_left = MAX_CONCURRENT_POSITIONS - open_count
     remaining_cash = free_cash
+    # PLT router 用 DB 接続を1つだけ確保 (ループ毎に開くより高速)
+    router_con = None
+    try:
+        router_con = get_connection(db_path)
+    except Exception as e:
+        errors.append(f"router_con:{e}")
+
     for ticker, vote_result in votes.items():
         if len(position_size) >= slots_left:
             break  # slots_full は記録しない（A/B比較と無関係）
@@ -231,15 +435,23 @@ def kelly_node(state: ScanState) -> dict:
         if consensus < CONSENSUS_THRESHOLD:
             continue
         edge = vote_result.get("dev")
+        df = market_data.get(ticker)
+
+        # EVS を最初に計算（pass経路でも記録するため）
+        evs_comp = _build_evs_for_record(
+            ticker=ticker, df=df, vote_result=vote_result,
+            nikkei_ma25_dev=nikkei_ma25_dev,
+            held_tickers=existing_tickers, db_path=db_path,
+        )
 
         # A/B: treatment ブックは弱気レジーム(p4)時のみ建玉（regime_filter）。
-        # control ブックは従来通り consensus≥閾値で建玉。
         if regime_filter and not vote_result.get("p4"):
             try:
-                record_proposal(
-                    ticker=ticker, decision="pass", decided_date=today,
+                _record_with_evs(
+                    ticker=ticker, decision="pass", today=today,
                     book=book, consensus=consensus, edge=edge,
                     council_reason="regime_filter_skip:p4=False", db_path=db_path,
+                    evs_comp=evs_comp,
                 )
             except Exception as e:
                 errors.append(f"decision_shadow:{ticker}:{e}")
@@ -247,54 +459,84 @@ def kelly_node(state: ScanState) -> dict:
         if ticker in existing_tickers:
             logger.info("Skip %s: already has open position", ticker)
             try:
-                record_proposal(
-                    ticker=ticker, decision="pass", decided_date=today,
+                _record_with_evs(
+                    ticker=ticker, decision="pass", today=today,
                     book=book, consensus=consensus, edge=edge,
                     council_reason="already_open", db_path=db_path,
+                    evs_comp=evs_comp,
                 )
             except Exception as e:
                 errors.append(f"decision_shadow:{ticker}:{e}")
             continue
 
-        df = market_data.get(ticker)
         if df is None or df.empty:
             try:
-                record_proposal(
-                    ticker=ticker, decision="pass", decided_date=today,
+                _record_with_evs(
+                    ticker=ticker, decision="pass", today=today,
                     book=book, consensus=consensus, edge=edge,
                     council_reason="no_market_data", db_path=db_path,
+                    evs_comp=evs_comp,
                 )
             except Exception as e:
                 errors.append(f"decision_shadow:{ticker}:{e}")
             continue
 
         price = float(df["close"].iloc[-1])
-        # サイジング規律の母数 = equity（初期+実現損益。trading-rules「対bankroll%」）。
-        # それを free_cash 残（手数料込み）でハードキャップ＝over-deploy防止。
-        shares = kelly_size(consensus, equity, price, flex=flex)
+
+        # v2 (Phase 0+): EVS あり + router_con あり → PLT lookup based sizing
+        sizing_decision: SizingDecision | None = None
+        if evs_comp is not None and router_con is not None:
+            try:
+                from src.sizing.plt import assign_rsi_bin  # noqa: F401  (used via decide_cap)
+                rsi_for_bin = _extract_indicators(df).get("rsi") or 20.0
+                sizing_decision = decide_cap(
+                    con=router_con, components=evs_comp,
+                    consensus=consensus, rsi=float(rsi_for_bin),
+                    nikkei_ma25_dev=nikkei_ma25_dev,
+                    ticker=ticker, decided_date=today,
+                )
+                cap_value = equity * sizing_decision.cap_pct
+                shares = int(cap_value / price / 100) * 100
+                if flex and shares == 0 and equity >= price * 100 and sizing_decision.cap_pct > 0:
+                    shares = 100  # flex min-1-unit
+            except Exception as e:
+                errors.append(f"router:{ticker}:{e}")
+                # Fallback to legacy kelly_size
+                shares = kelly_size(consensus, equity, price, flex=flex)
+        else:
+            # EVS 計算失敗 or router_con なし → legacy kelly_size に fallback
+            shares = kelly_size(consensus, equity, price, flex=flex)
+
         shares = _cap_shares_by_cash(shares, price, remaining_cash)
         if shares > 0:
             position_size[ticker] = shares
             remaining_cash -= shares * price + calc_commission(price, shares)
             try:
-                record_proposal(
-                    ticker=ticker, decision="go", decided_date=today,
+                _record_with_evs(
+                    ticker=ticker, decision="go", today=today,
                     book=book, consensus=consensus, edge=edge,
                     proposed_yen=shares * price,
                     council_reason="kelly_ok", db_path=db_path,
+                    evs_comp=evs_comp, sizing_decision=sizing_decision,
                 )
             except Exception as e:
                 errors.append(f"decision_shadow:{ticker}:{e}")
         else:
             try:
-                record_proposal(
-                    ticker=ticker, decision="pass", decided_date=today,
+                _record_with_evs(
+                    ticker=ticker, decision="pass", today=today,
                     book=book, consensus=consensus, edge=edge,
                     council_reason="shares_zero", db_path=db_path,
+                    evs_comp=evs_comp, sizing_decision=sizing_decision,
                 )
             except Exception as e:
                 errors.append(f"decision_shadow:{ticker}:{e}")
 
+    if router_con is not None:
+        try:
+            router_con.close()
+        except Exception:
+            pass
     return {"position_size": position_size, "errors": errors}
 
 

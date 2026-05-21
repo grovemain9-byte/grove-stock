@@ -936,3 +936,50 @@ ON CONFLICT DO UPDATE で「最新の判断」を残す設計。同日内で pos
 ### 教訓
 - **「冪等性」を後付けすると migration が必要になる**: 最初から UNIQUE 制約を入れていれば row id seq の reset 等の手間は不要。新規 table 設計時に「同日複数回呼ばれる前提」を考えて key 設計すべき
 - **schema 変更 + migration script + idempotent flag は組合せる**: migration を `_connect()` で毎回走らせるとコスト高 → 別 script + `duckdb_constraints()` で既に存在チェック (冪等)
+
+---
+
+## 2026-05-21: Phase 0+ EVS/PLT サイジング刷新（Grove刷新後）
+
+### Grove要求の根本転換
+旧 EVS 設計 (4 factors / 固定 cap / Phase 1 先送り) は「保守的すぎ・最大効率探索してない」と批判 → **「動的にテスト・成績表で動く・1-10段階」** で再設計
+
+### v2 アーキテクチャ (5 layers)
+1. **10 factor EVS** (F1-F10): consensus / deviation / RSI / BB / volume / sector-winrate / market regime / vol filter / concentration / liquidity
+2. **Pattern Lookup Table (PLT)**: 6軸 × 432 セル成績表。Beta-Bernoulli shrinkage + Quarter Kelly fraction
+3. **Router**: PLT 主軸 / EVS cold-cell fallback / ε-greedy exploration (20% → 10%)
+4. **decision_shadow v2**: 10 features + cell_id + cap_pct + sizing_source 全保存
+5. **kelly_node 統合**: 7 record_proposal 経路すべて router 経由
+
+### ファイル変更 (8 files / +2,800 行)
+- `src/sizing/evs.py` 新規 (350行) — 10-factor scoring + cap function
+- `src/sizing/plt.py` 新規 (310行) — bin化 / aggregate / persistence
+- `src/sizing/router.py` 新規 (180行) — PLT lookup + ε-greedy dispatcher
+- `src/main.py` +200行 — kelly_node router統合 + helper関数群
+- `src/measurement/decision_shadow.py` +30行 — schema v2 (9 新規カラム)
+- `scripts/bootstrap_plt.py` 新規 (140行) — 既存25 trades から初期PLT構築
+- `scripts/migrate_decision_shadow_v2.py` 新規 (75行) — 冪等migration
+- `tests/test_evs.py` 新規 (340行 / 57 tests), `test_plt.py` 新規 (220行 / 36 tests), `test_router.py` 新規 (180行 / 10 tests)
+
+### 数字（実測）
+- **Test pass**: 152/152 (test_multibook + test_scan_graph + test_measurement + 新3 suites)
+- **Bootstrap PLT**: 25 closed trades → **6 unique cells** (拡張前は 4 cells)
+- **End-to-end dry-run**: 69200 entry で EVS=0.217, cell="c4_d1_r1_b0_bear_tech", cap=22.99%, position=800株
+- **TICKER_SECTORS 拡張**: 13 → 50+ ticker mapping (J-Quants 5桁形式対応)
+
+### 反直感的発見 (PLT bootstrap)
+- `c3_d1_r1_b0_bear_other` (consensus=3 で大幅乖離) n=8, win率=25%, avg_pnl=-2.1%
+- **「強シグナル = 高勝率」の仮説は実データで否定された**
+- Beta(5,3) shrinkage で Kelly fraction = 0 → cap=floor(10%) で empirical自己防衛機構が機能
+- Phase 1 で scipy 重み最適化を回すと F2(deviation_depth) が負の重みになる可能性
+
+### 教訓
+1. **「設計時の仮説を必ず実データで検証する」**: 既存 27 closed が「強いシグナル ≠ 勝つ」を証明 → 仮説固定だったら本番で重い損失
+2. **「PLT主軸 + EVS fallback」の Grove 判断は正解**: 旧 EVS 単独だと「強信号→高 cap」で逆方向に大量資金投入。PLT が成績表で自動制御
+3. **「データ生成パイプライン稼働 > 機構の完成」**: 本番に乗らないコードはデータを生まない＝学習しない。火曜朝 cron 投入を最優先
+
+### Next Step
+- 火曜朝 cron で稼働 → 5book × 数十候補/日のデータ生成開始
+- 来週金曜 (n+50) で初回 scipy 重み最適化試行 (Phase 1)
+- weekly_retrain cron 設定
+- test_oss_smoke の max_drawdown baseline 更新 (前 session 漏れ)
