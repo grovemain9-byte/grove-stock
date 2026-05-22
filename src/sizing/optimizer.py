@@ -34,8 +34,8 @@ MIN_SAMPLES_FOR_OPTIMIZATION = 30  # データ不足ならskip
 WALK_FORWARD_N_SPLITS = 5
 EMBARGO_DAYS = 5  # max_hold_days と整合
 
-# Optimizer bounds and constraints
-WEIGHT_BOUNDS = [(0.0, 1.0)] * 5
+# Optimizer bounds and constraints (9 factors since 2026-05-22 all-additive)
+WEIGHT_BOUNDS = [(0.0, 1.0)] * 9
 WEIGHT_SUM = 1.0  # equality constraint
 
 # Sharpe annualization (daily-ish; trades happen on entry-day evaluation)
@@ -60,6 +60,16 @@ class OptimizationResult:
         return d
 
 
+# 9-factor order (matches evs.DEFAULT_WEIGHTS keys; 2026-05-22 all-additive刷新)
+FACTOR_KEYS = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F10"]
+FACTOR_JSON_FIELDS = [
+    "f1_signal_strength", "f2_deviation_depth", "f3_rsi_oversold",
+    "f4_bb_penetration", "f5_volume_decline", "f6_bayes_winrate",
+    "f7_market_regime", "f8_realized_vol_filter", "f10_liquidity_filter",
+]
+N_FACTORS = len(FACTOR_KEYS)
+
+
 def _load_resolved_trades(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     """Pull resolved (cf_pnl_pct set) trades with their EVS feature JSON."""
     df = con.execute(
@@ -74,25 +84,22 @@ def _load_resolved_trades(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     ).fetchdf()
     if df.empty:
         return df
-    # Parse JSON into columns f1..f5
+    # Parse JSON into 9 factor columns
     parsed = df["evs_components_json"].apply(lambda s: json.loads(s) if s else {})
-    for f in ["f1_signal_strength", "f2_deviation_depth", "f3_rsi_oversold",
-              "f4_bb_penetration", "f5_volume_decline"]:
+    for f in FACTOR_JSON_FIELDS:
         df[f] = parsed.apply(lambda d: d.get(f, 0.0))
     return df
 
 
 def _evs_from_weights(df: pd.DataFrame, w: np.ndarray) -> np.ndarray:
-    """Recompute edge_score per row given new weights."""
-    f1 = df["f1_signal_strength"].to_numpy()
-    f2 = df["f2_deviation_depth"].to_numpy()
-    f3 = df["f3_rsi_oversold"].to_numpy()
-    f4 = df["f4_bb_penetration"].to_numpy()
-    f5 = df["f5_volume_decline"].to_numpy()
+    """Recompute additive 9-factor score per row given weights."""
     w_sum = w.sum()
     if w_sum <= 0:
         return np.zeros(len(df))
-    return (w[0]*f1 + w[1]*f2 + w[2]*f3 + w[3]*f4 + w[4]*f5) / w_sum
+    acc = np.zeros(len(df))
+    for i, field in enumerate(FACTOR_JSON_FIELDS):
+        acc = acc + w[i] * df[field].to_numpy()
+    return acc / w_sum
 
 
 def _sharpe(returns: np.ndarray) -> float:
@@ -187,7 +194,7 @@ def optimize_weights(
         return None
 
     initial = initial or INITIAL_WEIGHTS
-    w0 = np.array([initial.get(k, 0.2) for k in ["F1", "F2", "F3", "F4", "F5"]])
+    w0 = np.array([initial.get(k, 1.0 / N_FACTORS) for k in FACTOR_KEYS])
     # Normalize initial sum to 1
     if w0.sum() > 0:
         w0 = w0 / w0.sum()
@@ -215,8 +222,8 @@ def optimize_weights(
     out = OptimizationResult(
         n_samples=n,
         n_folds=n_splits,
-        initial_weights={f"F{i+1}": float(w0[i]) for i in range(5)},
-        optimal_weights={f"F{i+1}": float(optimal_w[i]) for i in range(5)},
+        initial_weights={FACTOR_KEYS[i]: float(w0[i]) for i in range(N_FACTORS)},
+        optimal_weights={FACTOR_KEYS[i]: float(optimal_w[i]) for i in range(N_FACTORS)},
         initial_sharpe=initial_score,
         optimal_sharpe=optimal_score,
         improvement=optimal_score - initial_score,

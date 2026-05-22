@@ -104,9 +104,11 @@ class TestKellyNodeMultibook:
         assert out["position_size"].get("3000A") == 100
 
     def test_large_strict_book_uses_pct(self):
-        """Phase 0+ (2026-05-21): v2 router経由でEVS→cap_pct動的決定。
-        EVSが極小(評価不可特徴量)時、cell_id不在→evs_fallback (cap≈0.10〜0.13)。
-        実測: cap_pct≒0.12 で 1200株。旧kelly固定0.10(=1000株)から挙動変更。
+        """Phase 0+ all-additive (2026-05-22): v2 router経由でEVS→cap_pct動的決定。
+        加算合成化で bare consensus=3 の baseline cap が ~27% に上昇
+        (F1=0.6 + F6 winrate prior 0.625 が加算で底上げ)。30M×0.27/3000≈2700株。
+        旧乗算崩壊時代の 1200株から再度の意図的挙動変更。
+        この baseline 高さは「weak setup の cap 上限」として 5/30 scipy で調整予定。
         """
         state = {
             "votes": self._votes("3000B"),
@@ -117,8 +119,8 @@ class TestKellyNodeMultibook:
         }
         out = kelly_node(state)
         shares = out["position_size"].get("3000B", 0)
-        # v2: router-driven, expect 100-2100 range (consensus=3 baseline)
-        assert 100 <= shares <= 2100, f"unexpected v2 size: {shares}"
+        # v2 additive: router-driven, expect 100-3500 range (consensus=3 baseline ~27%)
+        assert 100 <= shares <= 3500, f"unexpected v2 size: {shares}"
 
     def test_cash_guard_caps_cumulative_deployment(self):
         """free_cash ¥350k・¥3000株2件: 1件目100株(¥300k)で現金尽き2件目は0。"""

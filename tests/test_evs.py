@@ -267,10 +267,10 @@ class TestWeightsLoader:
 
 class TestCapFunction:
     def test_cap_at_zero_evs(self):
-        assert cap_function(0.0) == pytest.approx(0.10)
+        assert cap_function(0.0) == pytest.approx(0.02)
 
     def test_cap_at_half_evs(self):
-        assert cap_function(0.5) == pytest.approx(0.40)
+        assert cap_function(0.5) == pytest.approx(0.36)  # 0.02 + 0.68×0.5
 
     def test_cap_at_full_evs(self):
         assert cap_function(1.0) == pytest.approx(0.70)
@@ -279,7 +279,7 @@ class TestCapFunction:
         assert cap_function(1.5) == pytest.approx(0.70)
 
     def test_cap_clipped_below_zero(self):
-        assert cap_function(-0.3) == pytest.approx(0.10)
+        assert cap_function(-0.3) == pytest.approx(0.02)
 
 
 # ============================================================================
@@ -328,7 +328,21 @@ class TestComputeEVSIntegration:
             held_tickers=set(), held_sectors={},
         )
         assert c.f5_volume_decline == 0.0  # increasing volume → 0
-        assert c.evs_total < 0.20  # multiple penalties stack
+        # All-additive (2026-05-22): weak setup gets MODERATE not near-zero EVS,
+        # because consensus≥3 (F1≥0.6) + winrate prior (F6=0.625) contribute a
+        # baseline. This is the「可能性を消さない」design. It should still be
+        # clearly below a strong setup (relative comparison).
+        c_perfect = compute_evs(
+            consensus=5, actual_dev=-0.10, sector_threshold=-0.05,
+            rsi=18.0, close=980.0, bb_lower=1000.0,
+            volumes_3day=(2000.0, 1500.0, 1000.0),
+            sector_wins=10, sector_losses=2, nikkei_ma25_dev=-0.02,
+            realized_vol_20d=0.20, avg_volume_20d=1_000_000.0,
+            target_ticker="7203", target_sector="auto",
+            held_tickers=set(), held_sectors={},
+        )
+        assert c.evs_total < c_perfect.evs_total * 0.60  # weak ≪ strong
+        assert c.evs_total < 0.50  # moderate ceiling
 
     def test_concentration_penalty_drops_evs(self):
         """Perfect signal but already 3 positions in same sector → penalty drops EVS."""

@@ -47,13 +47,25 @@ logger = logging.getLogger("sizing.evs")
 
 # Default signal layer weights (additive). Phase 0+ initial (Grove 2026-05-21).
 # Phase 1 で scipy.optimize の出力 (data/evs_weights.json) が読み込まれて上書き。
+# All-additive 9-factor weighting (Grove 2026-05-22 刷新後).
+# 旧構造 (F1-F5 加重和 × F6·F7·F8·F10 乗算) は prior_adj median=0.09 に崩壊した
+# (4要素乗算の AND 的性質)。Grove方針「可能性を消すな・スコアでサイズ」に基づき
+# 全 9 factor を1つの加重和に統合。F9(集中) のみ (1-penalty) 乗算ペナルティとして残す。
+# F10(流動性) は paper ではスコア (建てる)、live では参加率ゲートに昇格 (別途実装)。
+# 重みは data/evs_weights.json で動的上書き、5/30 scipy 最適化で学習。
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "F1": 0.20,  # consensus
-    "F2": 0.20,  # deviation depth
-    "F3": 0.10,  # rsi
-    "F4": 0.10,  # bb penetration
-    "F5": 0.10,  # volume decline
-}
+    # Signal layer (BNF逆張りの core edge)
+    "F1": 0.18,   # consensus
+    "F2": 0.18,   # deviation depth
+    "F3": 0.10,   # rsi
+    "F4": 0.10,   # bb penetration
+    "F5": 0.08,   # volume decline
+    # Quality layer (旧 multiplicative prior — additive に格下げで崩壊回避)
+    "F6": 0.16,   # bayes winrate
+    "F7": 0.08,   # market regime
+    "F8": 0.06,   # realized vol filter (Grove W2: 残す、5/30検証)
+    "F10": 0.06,  # liquidity (paper=score)
+}  # sum = 1.00
 
 # Module-level WEIGHTS (mutable): overridden by data/evs_weights.json if exists.
 # Path resolved from env var EVS_WEIGHTS_PATH or default location.
@@ -109,8 +121,11 @@ def reload_weights() -> dict[str, float]:
     WEIGHTS = _resolve_weights()
     return WEIGHTS
 
-CAP_FLOOR = 0.10            # EVS=0 → 10% of capital
-CAP_CEILING_DELTA = 0.60    # EVS=1 → 70% of capital
+# Cap curve: cap = CAP_FLOOR + CAP_CEILING_DELTA × EVS, range [2%, 70%].
+# CAP_FLOOR 引下げ 0.10→0.02 (Grove W5): 真の floor は「1単元保証(株数ベース)」であり
+# % floor ではない。EVS≤0 は router でゲート (0株) するため、% floor は EVS>0 のみ適用。
+CAP_FLOOR = 0.02            # EVS→0+ → 2% (1単元保証が実質下限)
+CAP_CEILING_DELTA = 0.68    # EVS=1 → 70% of capital
 
 # Bayesian shrinkage priors (Beta-Bernoulli).
 # Phase 0: optimistic prior reflecting all-book aggregate of 70.4% winrate.
@@ -146,16 +161,16 @@ class EVSComponents:
     f3_rsi_oversold: float
     f4_bb_penetration: float
     f5_volume_decline: float
-    # Multiplicative layer (prior + filters + penalty)
+    # Quality layer (additive since 2026-05-22; F9 is the only penalty)
     f6_bayes_winrate: float
     f7_market_regime: float
     f8_realized_vol_filter: float
     f9_concentration_penalty: float
     f10_liquidity_filter: float
     # Composites
-    edge_score: float          # weighted sum of F1..F5 (normalized)
-    prior_adj: float           # F6 × F7 × F8 × F10 (multiplicative quality)
-    evs_total: float           # edge_score × prior_adj × (1 - F9)
+    edge_score: float          # signal-only sub-score (weighted F1..F5, diagnostic)
+    prior_adj: float           # legacy F6·F7·F8·F10 multiplicative (diagnostic only)
+    evs_total: float           # score(all 9 additive) × (1 - F9)
     cap_pct: float             # fallback linear cap (used only when PLT cold)
 
     def as_dict(self) -> dict:
@@ -338,7 +353,7 @@ def compute_evs(
     a neutral value (0 for signal-side, 0.85 for prior-side uncertainty).
     This preserves entry option but penalizes low-information setups.
     """
-    # Signal layer (F1-F5, additive)
+    # Signal layer (F1-F5)
     f1 = signal_strength(consensus)
     f2 = (deviation_depth(actual_dev, sector_threshold)
           if (actual_dev is not None and sector_threshold is not None) else 0.0)
@@ -349,24 +364,33 @@ def compute_evs(
           if volumes_3day is not None and all(v is not None for v in volumes_3day)
           else 0.0)
 
-    # Prior / filter / penalty layer (F6-F10, multiplicative)
+    # Quality layer (F6-F8, F10) — additive (旧乗算 prior_adj 崩壊を回避)
     f6 = bayes_winrate(sector_wins, sector_losses)
     f7 = market_regime(nikkei_ma25_dev)
     f8 = realized_vol_filter(realized_vol_20d)
-    f9 = concentration_penalty(target_ticker, target_sector, held_tickers, held_sectors)
     f10 = liquidity_filter(avg_volume_20d)
 
+    # Concentration (F9) — 唯一の乗算ペナルティとして残す (1-F9)
+    f9 = concentration_penalty(target_ticker, target_sector, held_tickers, held_sectors)
+
+    # --- All-additive composition (Grove 2026-05-22) ---
+    # 9 factor を1つの加重和に。1要素が低くても全崩壊しない (旧乗算の AND 性質を解消)。
     w_sum = sum(WEIGHTS.values())
+    factor_vals = {
+        "F1": f1, "F2": f2, "F3": f3, "F4": f4, "F5": f5,
+        "F6": f6, "F7": f7, "F8": f8, "F10": f10,
+    }
+    score = sum(WEIGHTS[k] * v for k, v in factor_vals.items()) / w_sum
+    # edge_score = signal-only サブスコア (診断用に保持)
+    sig_w = WEIGHTS["F1"] + WEIGHTS["F2"] + WEIGHTS["F3"] + WEIGHTS["F4"] + WEIGHTS["F5"]
     edge_score = (
-        WEIGHTS["F1"] * f1
-        + WEIGHTS["F2"] * f2
-        + WEIGHTS["F3"] * f3
-        + WEIGHTS["F4"] * f4
-        + WEIGHTS["F5"] * f5
-    ) / w_sum
-    # Multiplicative quality adj (4 boost factors, F9 is penalty applied separately)
+        WEIGHTS["F1"] * f1 + WEIGHTS["F2"] * f2 + WEIGHTS["F3"] * f3
+        + WEIGHTS["F4"] * f4 + WEIGHTS["F5"] * f5
+    ) / sig_w if sig_w > 0 else 0.0
+    # prior_adj は旧乗算を診断用に残すが evs_total には使わない (後方互換 logging)
     prior_adj = f6 * f7 * f8 * f10
-    evs_total = edge_score * prior_adj * (1.0 - f9)
+    # 集中ペナルティのみ乗算
+    evs_total = score * (1.0 - f9)
     cap_pct = cap_function(evs_total)
 
     return EVSComponents(

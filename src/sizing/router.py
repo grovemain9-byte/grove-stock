@@ -113,6 +113,22 @@ def decide_cap(
     )
     cell_id = cell_key.to_id()
 
+    # --- Zero-EVS gate (leak fix 2026-05-22) ---
+    # EVS≤0 (信号皆無 or 集中ペナルティ=1) は建てない。
+    # 旧バグ: cap_function(0)=CAP_FLOOR(0.10) のため shares_from_decision が
+    # evs_total を見ず 10% 配分を承認していた (流動性ゼロ銘柄に資金を入れる)。
+    # ここで明示ゲートし cap_pct=0 を返す → shares_from_decision が 0 株にする。
+    if components.evs_total <= 0.0:
+        return SizingDecision(
+            cap_pct=0.0,
+            source="evs_zero",
+            cell_id=cell_id,
+            cell_n_samples=0,
+            cell_confidence="cold",
+            exploration_flag=False,
+            fallback_used=True,
+        )
+
     # PLT lookup
     cell = lookup_cell(con, cell_id)
 

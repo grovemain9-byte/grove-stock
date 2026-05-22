@@ -70,29 +70,26 @@ class TestSharpe:
 
 
 class TestEvsFromWeights:
-    def test_uniform_weights(self):
+    @staticmethod
+    def _df9(*rows):
+        """Build a DataFrame with all 9 factor columns. Each row is a single value
+        broadcast to all 9 factors."""
         import pandas as pd
-        df = pd.DataFrame({
-            "f1_signal_strength": [1.0, 0.5],
-            "f2_deviation_depth": [1.0, 0.5],
-            "f3_rsi_oversold": [1.0, 0.5],
-            "f4_bb_penetration": [1.0, 0.5],
-            "f5_volume_decline": [1.0, 0.5],
-        })
-        w = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
+        from src.sizing.optimizer import FACTOR_JSON_FIELDS
+        data = {field: [r for r in rows] for field in FACTOR_JSON_FIELDS}
+        return pd.DataFrame(data)
+
+    def test_uniform_weights(self):
+        # All 9 factors = 1.0 (row0) and 0.5 (row1), uniform weights → 1.0 and 0.5
+        df = self._df9(1.0, 0.5)
+        w = np.full(9, 1.0 / 9)
         edge = _evs_from_weights(df, w)
-        # Sum = 1.0, weighted = 1.0 and 0.5
         assert edge[0] == pytest.approx(1.0)
         assert edge[1] == pytest.approx(0.5)
 
     def test_zero_weights_zero_edge(self):
-        import pandas as pd
-        df = pd.DataFrame({
-            "f1_signal_strength": [1.0], "f2_deviation_depth": [1.0],
-            "f3_rsi_oversold": [1.0], "f4_bb_penetration": [1.0],
-            "f5_volume_decline": [1.0],
-        })
-        w = np.zeros(5)
+        df = self._df9(1.0)
+        w = np.zeros(9)
         assert _evs_from_weights(df, w)[0] == 0.0
 
 
