@@ -21,20 +21,25 @@ class Book(NamedTuple):
     initial_capital: float
     flex: bool            # True=少額柔軟サイジング（最低1単元保証・上限なし）
     regime_filter: bool = False  # True=弱気時(p4)のみ建玉。A/B用 per-book overlay
+    max_concurrent: int = 7  # 同時保有上限。資金規模に応じて分散度を変える
 
 
+# 2026-05-24: max_concurrent を book別に動的化（旧: 全book 7固定）
+# 5/17 ユニバース拡大(494→1337銘柄)後、consensus=5 の最強シグナルが全book
+# max_concurrent_full で全件pass される機能不全を発見。資金規模に比例した
+# 分散上限に変更し、強シグナルが必ず席を取れるよう main.py で consensus
+# DESC ソートも同時導入。
+#
 # regime_filter A/B（2026-05-17 Grove承認）: 継続ループが regime_filter を
 # 3手法再現・3/3 walk-forward・損失年黒字化で GO 判定。全面適用でなく一部
 # ブックに適用して実 paper で対照比較（残りは control＝データ生成も継続）。
 # treatment = {p5m, p30m}（資金規模を散らす）/ control = {p1m, p10m, p50m}。
-# DEFAULTS.p4_required は False 維持＝engine/backtest G3 golden 不変。本 A/B は
-# LIVE paper の per-book overlay（kelly_node が book毎に p4 必須を上乗せ）。
 BOOKS: tuple[Book, ...] = (
-    Book("p1m", 1_000_000.0, True, regime_filter=False),    # control
-    Book("p5m", 5_000_000.0, True, regime_filter=True),     # treatment
-    Book("p10m", 10_000_000.0, False, regime_filter=False),  # control
-    Book("p30m", 30_000_000.0, False, regime_filter=True),   # treatment
-    Book("p50m", 50_000_000.0, False, regime_filter=False),  # control
+    Book("p1m", 1_000_000.0, True, regime_filter=False, max_concurrent=2),   # control / ¥500K per slot
+    Book("p5m", 5_000_000.0, True, regime_filter=True, max_concurrent=5),    # treatment / ¥1M per slot
+    Book("p10m", 10_000_000.0, False, regime_filter=False, max_concurrent=7),  # control / ¥1.4M per slot (現状維持)
+    Book("p30m", 30_000_000.0, False, regime_filter=True, max_concurrent=12),  # treatment / ¥2.5M per slot
+    Book("p50m", 50_000_000.0, False, regime_filter=False, max_concurrent=20), # control / ¥2.5M per slot
 )
 
 LEGACY_BOOK = "legacy"  # マルチブック化以前の既存3ポジションのタグ

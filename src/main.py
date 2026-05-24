@@ -368,6 +368,7 @@ def kelly_node(state: ScanState) -> dict:
         free_cash = state.get("book_free_cash", 0.0)
         flex = state.get("book_flex", False)
         regime_filter = state.get("book_regime_filter", False)
+        max_concurrent = int(state.get("book_max_concurrent") or MAX_CONCURRENT_POSITIONS)
         existing_tickers = set(state.get("book_open_tickers", set()))
     else:
         # 従来経路（dry-run/live/既存テスト）: 挙動不変
@@ -380,6 +381,7 @@ def kelly_node(state: ScanState) -> dict:
         free_cash = equity
         flex = False
         regime_filter = False  # 従来経路は regime_filter 無し（挙動不変）
+        max_concurrent = MAX_CONCURRENT_POSITIONS  # 従来挙動を保存
         existing_tickers = set()
         try:
             con = get_connection(db_path)
@@ -393,12 +395,20 @@ def kelly_node(state: ScanState) -> dict:
     market_data = state.get("market_data", {})
     nikkei_ma25_dev = state.get("nikkei_ma25_dev")
 
-    # 同時保有上限チェック
+    # consensus DESC ソート: 強シグナルを先にfillし、弱シグナルに席を奪われない
+    # (5/17 拡大ユニバースで consensus=5 が全book max_concurrent_full で捨てられた問題の修正)
+    sorted_votes = sorted(
+        votes.items(),
+        key=lambda kv: (kv[1].get("consensus", 0), kv[1].get("dev") or 0.0),
+        reverse=True,
+    )
+
+    # 同時保有上限チェック (book別)
     open_count = len(existing_tickers)
-    if open_count >= MAX_CONCURRENT_POSITIONS:
-        logger.info("skip kelly: max concurrent positions (%d) reached", MAX_CONCURRENT_POSITIONS)
+    if open_count >= max_concurrent:
+        logger.info("skip kelly: max concurrent positions (%d) reached", max_concurrent)
         # A/B評価のため、consensus≥3 の判断は枠制約理由で pass 記録する
-        for ticker, vote_result in votes.items():
+        for ticker, vote_result in sorted_votes:
             consensus = vote_result.get("consensus", 0)
             if consensus < CONSENSUS_THRESHOLD:
                 continue
@@ -419,7 +429,7 @@ def kelly_node(state: ScanState) -> dict:
                 errors.append(f"decision_shadow:{ticker}:{e}")
         return {"position_size": {}, "errors": errors}
 
-    slots_left = MAX_CONCURRENT_POSITIONS - open_count
+    slots_left = max_concurrent - open_count
     remaining_cash = free_cash
     # PLT router 用 DB 接続を1つだけ確保 (ループ毎に開くより高速)
     router_con = None
@@ -428,7 +438,7 @@ def kelly_node(state: ScanState) -> dict:
     except Exception as e:
         errors.append(f"router_con:{e}")
 
-    for ticker, vote_result in votes.items():
+    for ticker, vote_result in sorted_votes:
         if len(position_size) >= slots_left:
             break  # slots_full は記録しない（A/B比較と無関係）
         consensus = vote_result.get("consensus", 0)
@@ -698,6 +708,7 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
             "book_free_cash": free_cash,
             "book_flex": bk.flex,
             "book_regime_filter": bk.regime_filter,
+            "book_max_concurrent": bk.max_concurrent,
             "book_open_tickers": open_tk,
         }
         ks = kelly_node(bstate)

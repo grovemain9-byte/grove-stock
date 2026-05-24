@@ -313,6 +313,75 @@ class TestRegimeFilterAB:
         assert ct == {"p1m", "p10m", "p50m"}
 
 
+# === book別 max_concurrent + consensus DESC ソート (2026-05-24 修正) ===
+
+class TestPerBookMaxConcurrent:
+    """5/17 ユニバース拡大(494→1337)後、consensus=5の最強シグナルが全book
+    max_concurrent_full で全件pass される機能不全の修正検証。
+    """
+
+    def test_book_max_concurrent_per_capital(self):
+        """config/books.py で book毎に max_concurrent が資金比で設定されている。"""
+        from config.books import BOOKS
+        m = {b.book_id: b.max_concurrent for b in BOOKS}
+        assert m == {"p1m": 2, "p5m": 5, "p10m": 7, "p30m": 12, "p50m": 20}
+
+    def test_kelly_node_respects_book_max_concurrent(self):
+        """p1m (max=2) は2銘柄保有時、新シグナルを max_concurrent_full でskip。"""
+        state = {
+            "votes": {"NEW1": {"consensus": 5}, "NEW2": {"consensus": 4}},
+            "market_data": {
+                "NEW1": _make_df([1000.0] * 30),
+                "NEW2": _make_df([1000.0] * 30),
+            },
+            "book": "p1m", "book_equity": 1_000_000.0,
+            "book_free_cash": 500_000.0, "book_flex": True,
+            "book_max_concurrent": 2,
+            "book_open_tickers": {"HELD1", "HELD2"}, "errors": [],
+        }
+        out = kelly_node(state)
+        assert out["position_size"] == {}  # 2枠full → 全pass
+
+    def test_kelly_node_p50m_allows_20_slots(self):
+        """p50m (max=20) は8銘柄保有でも新シグナル受け入れ可能 (旧7制限なら却下)。"""
+        held = {f"H{i:03d}" for i in range(8)}
+        state = {
+            "votes": {"NEW": {"consensus": 5}},
+            "market_data": {"NEW": _make_df([3000.0] * 30)},
+            "book": "p50m", "book_equity": 50_000_000.0,
+            "book_free_cash": 30_000_000.0, "book_flex": False,
+            "book_max_concurrent": 20,
+            "book_open_tickers": held, "errors": [],
+        }
+        out = kelly_node(state)
+        assert out["position_size"].get("NEW", 0) > 0  # 8/20で枠あり → 建つ
+
+    def test_kelly_node_fills_strongest_consensus_first(self):
+        """slots_left=1 の状況で、consensus=5 と consensus=3 が同時に来たら
+        consensus=5 が優先される (旧: dict insertion順 = 弱シグナル先勝ち)。"""
+        held = {f"H{i:03d}" for i in range(6)}  # 6 held, max=7, 1 slot
+        # insertion順は WEAK が先 → 旧コードならWEAKが取る
+        votes = {
+            "WEAK": {"consensus": 3, "dev": -0.03},
+            "STRONG": {"consensus": 5, "dev": -0.10},
+        }
+        state = {
+            "votes": votes,
+            "market_data": {
+                "WEAK": _make_df([3000.0] * 30),
+                "STRONG": _make_df([3000.0] * 30),
+            },
+            "book": "p10m", "book_equity": 10_000_000.0,
+            "book_free_cash": 4_000_000.0, "book_flex": False,
+            "book_max_concurrent": 7,
+            "book_open_tickers": held, "errors": [],
+        }
+        out = kelly_node(state)
+        ps = out["position_size"]
+        assert "STRONG" in ps and "WEAK" not in ps, \
+            f"strongest consensus must win the last slot, got {ps}"
+
+
 def test_execution_defaults_legacy_book(tmp_path):
     """book 未指定（従来 run_scan_cycle 経路）は 'legacy' タグ。"""
     db = str(tmp_path / "exec2.db")
