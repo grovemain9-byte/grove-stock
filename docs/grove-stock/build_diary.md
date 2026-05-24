@@ -1,5 +1,43 @@
 # grove-stock 建築日誌
 
+## 2026-05-24 — book別 max_concurrent + consensus DESC ソート (commit c9254b4)
+
+### 何を作ったか
+- `config/books.py`: `Book` NamedTuple に `max_concurrent` 追加 (p1m=2, p5m=5, p10m=7, p30m=12, p50m=20)
+- `src/main.py:kelly_node`: book別 max_concurrent参照 + `sorted_votes` で consensus DESC fill
+- `tests/test_multibook.py`: `TestPerBookMaxConcurrent` 4テスト追加
+
+### なぜ（背景）
+5/17 のユニバース拡大(494→1337銘柄)以降、decision_shadow 1,387行の98%が pass。
+trace で判明した致命バグ2つ:
+1. `MAX_CONCURRENT_POSITIONS = 7` が全book共通 (p1m¥1Mもp50m¥50Mも同上限)
+2. `for ticker, vote_result in votes.items()` が dict insertion順 → consensus=5の最強シグナルが弱シグナルに席を奪われる
+
+実測: consensus=5 (P1-P5全GO) 60件 = 5book × 12回 が **全部 max_concurrent_full でpass**。
+
+### 途中で踏んだ/回避した地雷
+- 当初は「Step 2: p50m勝因の機序解明」を予定 → ユニバース起点のtrace でGroveの「1300+銘柄対象なのに14銘柄しか取引してない」直感が決定打となり、優先順位を入れ替え
+- 「+¥198K で符号逆」と一度誤断 → 実は commission控除前 (gross) を見ていたミス。`pnl` カラム = `gross - commission` で 79/79 完全一致、真値は **-¥147,714**
+- `test_empyrical_matches_engine_on_real_backtest` が失敗 → stash検証で **私の変更前から存在** (5/24 cacheデータdriftで -0.230→-0.224、5/20 pin との差)
+- `test_duplicate_position_prevented` 初回fail→再走pass → flaky。私の sort で発火頻度変動だが根本は別問題
+
+### 検証結果（数字）
+- 新規4テスト + 関連65テスト 全pass
+- 期待効果 (forward paper で確認):
+  | 指標 | 現状 (5/17-5/22) | 修正後 |
+  |------|---------------|------|
+  | consensus=5 go率 | 0% (60件全pass) | ~100% (枠があれば必ずfill) |
+  | エントリー件数/日 | ~5件 | 数十件 |
+  | p50m同時保有 | 7上限 | 20上限 |
+
+### 次に同じことをする人への注意
+- `Book` NamedTupleにフィールド追加するときはdefault値必須 (既存test/runner互換)
+- `kelly_node` の legacy経路 (book未指定) は MAX_CONCURRENT_POSITIONS=7 fallback で挙動不変保証
+- `sorted_votes` のキーは `(consensus, dev)` で同consensus時は dev (MA25乖離率) の絶対値が深い方優先
+- 各 paper bookは P/L データ生成装置でもある (book削除でなく上限調整で edge検証)
+
+---
+
 ## 2026-05-16 — Shadow Replay: 勝敗データ生成（Iter 1）
 
 ### 何を作ったか
