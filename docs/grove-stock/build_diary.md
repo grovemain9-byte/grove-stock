@@ -1,5 +1,64 @@
 # grove-stock 建築日誌
 
+## 2026-05-25 (PM) — max_concurrent 再拡張 + F9同scan累積fix + sector pattern matching (commit 1dcd089)
+
+### 何を作ったか
+- `config/books.py`: max_concurrent 拡張 (p1m=2→4, p5m=5→10, p10m=7→15, p30m=12→20, p50m=20→30)
+- `src/main.py:kelly_node`: running_held_tickers でF9 同scan内累積fix
+- `src/sizing/plt.py:assign_sector`: 4桁前綴pattern matching拡張 (1351銘柄カバー)
+- `scripts/verify_max_concurrent_fix.sh`: Q10 (regime_filter A/B観察) 追加
+
+### なぜ
+2026-05-25 manual scan (commit f2fe223 3層cap後) で **二次成功と次layer露呈**:
+- p50m: 4→22 entry (5.5x), shares_zero 32→20%, slot_limited 18件発火
+- だが新ボトルネック:
+  1. p1m=2 + p10m=7 が 100% utilization
+  2. F9 concentration が同scan内累積されず、p50m 19250+85930 集中の温床
+  3. TICKER_SECTORS 30銘柄登録のみで1351銘柄の大半が "other" 集中
+
+### 3パッチの設計
+1. **max_concurrent 拡張**: 3層cap で per_slot動的縮小 → 過剰張りリスクなし
+2. **F9 同scan累積**: `running_held_tickers` を loop前 init, 各go後 add
+   - 旧: `existing_tickers` (scan前open) のみ参照、同scan内累積されず
+   - 新: 18件同セクター入っても順次 F9 penalty 累積
+3. **sector pattern matching**: 明示辞書 (戦略核心の閾値持つ) 最優先、4桁前綴で大半カバー
+   - 例: 5/25 entry 25銘柄を分類 → chem 8/const 6/other 4/tech 3/sec 2/food 2
+
+### 検証結果（forward paper 1日目PM、11:04 manual scan）
+- **全book entry: 12→31→60 (1日朝の5倍)**
+- p50m: 4→22→40 entry
+- p10m: 6→7→16 entry (max=15 で turnover も含む)
+- p1m: 2→2→4 entry (新max=4 達成)
+- shares_zero: 32%→20%→**18.3%** (p50m集中、free_cash枯渇後の正常動作)
+- max_concurrent_full: 0.8%→26.3%→**24.2%** (p1m 82件、turnover回転)
+- **net pnl: -¥132K→-¥45K→-¥11K** (12倍改善)
+- slot_limited発火: 18→**46回** (3層cap激しく機能)
+- F9機能確認: p50m open 15件で const 6 / chem 4 / other 3 / sec 2 に分散
+- regime_filter A/B: 今日p4=False で treatment全カット (正常)、bear日にデータ蓄積予定
+
+### 途中で踏んだ/回避した地雷
+- test_router の cold_cell test が ticker "9999" で fail
+  → pattern matching で "9999"→"tech" になりcell_id変わった。"71000" (other) に変更
+- max_concurrent 拡張だけだと既存テストの値固定アサーションが壊れる
+  → test_multibook の TestPerBookMaxConcurrent 値を {4,10,15,20,30} に更新
+- F9 fix は kelly_node 内部のループ状態管理 → 既存テストでは検知できない
+  → 次セッションで unit test 追加推奨
+
+### 教訓
+- **ボトルネック移動の法則**: 1層直すと次が露出 (consensus DESC → max_concurrent → cap_ceiling → F9 → sector taxonomy)
+- **A/B/E 3並列で1セッション完遂可能**: 「最小限禁止」原則に従い同時実装、テスト・commit・検証まで完走
+- F9 penalty 0.20/同セクター は累積で 0.80 capに到達 → サイズは絞れるが entry自体は止まらない設計
+  - sizing reduction であって entry block ではない
+  - sector集中を完全防止したいなら HARD ceiling (例: 同セクター3件まで) が必要 → 次の論点
+
+### 次に同じことをする人への注意
+- F9累積fix は kelly_node 内のみ。**scan_graph 全体テスト未追加**。次回 unit test 追加推奨
+- TICKER_SECTORS の pattern matching は **東証業種コード仮定** ベース。jquants APIから実sector_codeを取得して上書きする方が正確 (Phase 2タスク)
+- p1m=4 でも turnover で max_concurrent_full 82件発生 → p1m を「強信号のみ集中」運用に変える設計もあり (consensus=4以上 のみ)
+- 3層cap の Layer 3 (single_ticker 15%) は今回ほぼ発火せず (Layer 1 slot で先に絞られた)。将来 max_concurrent をさらに広げると Layer 3 が主役になる可能性
+
+---
+
 ## 2026-05-25 — Portfolio-aware 3層 cap制約 (forward paper 1日目発見の二次バグ修正)
 
 ### 何を作ったか
