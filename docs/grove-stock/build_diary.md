@@ -1,5 +1,63 @@
 # grove-stock 建築日誌
 
+## 2026-05-25 (PM4) — kabu commission ¥0 retrospective 試算 + onboarding checklist
+
+### 何を作ったか
+- analysis: 5/12-5/25 既存 198 closed positions を **commission ¥0想定** で再集計
+- `docs/grove-stock/kabu_onboarding_checklist.md` (新規): Grove側 (口座開設) + Davis側 (Phase 2実装) の完全 step list
+
+### 決定的な数字 (retrospective n=198 trades, 14営業日)
+| 指標 | 立花現状 | kabu想定 | 差 |
+|------|---------|---------|---|
+| **累計 Net PnL** | **-¥94,186** | **+¥377,561** | **+¥471,747** |
+| avg per-trade | -0.01% (break-even) | +0.22% | +0.22pp |
+| avg commission | ¥2,383 (22.1bps) | ¥0 | -22.1bps |
+
+### book別 ROC (年率換算)
+| book | 立花 ROC | kabu ROC | 差 (年率) |
+|------|---------|---------|---------|
+| **p50m** (n=105) | +8.4%/年 | **+24.1%/年** | **+15.7pp** ⭐ |
+| p5m (n=7) | +59.4%/年 | +64.9%/年 | +5.5pp |
+| p30m (n=7) | -15.8%/年 | -11.7%/年 | +4.1pp |
+| p10m (n=52) | -42.2%/年 | -26.0%/年 | +16.2pp |
+| p1m (n=24) | -41.9%/年 | -11.1%/年 | +30.8pp |
+
+### なぜ重要 (真の発見)
+5/20 audit:「BNF base はコスト後ノイズと統計的区別不可能」
+→ 実は **avg gross +0.22% = real edge**、**22.1bps commission がすべて食っていた**
+→ **broker移行 (立花→kabu) だけで edge_null 仮説が棄却される**
+→ BNF撤退は不要、commission構造が真の病巣
+
+### 月次/年次 推定 (60trades/日 想定)
+- 月間 commission削減: **¥2.86M/月**
+- 年間 commission削減: **¥34.3M/年**
+- p50m単独で 年率+24%/年が見込める (commission削減効果のみ)
+
+### onboarding checklist の構造 (kabu_onboarding_checklist.md)
+- **Phase A**: Grove側 開設 (1-2週間)
+  - 申込時に **信用取引口座 同時チェック必須** (Pro plan trigger)
+- **Phase B**: Davis側 Phase 2実装 (開通後1週間)
+  - kabuステーション セットアップ、Mac側疎通、Phase 2 KabuComClient完全実装、main.py統合、forward再走、LIVE準備
+- **Phase C**: 運用 (LIVE後維持)
+- **Phase D**: 将来 (法人化、12ヶ月後想定)
+
+### 途中で踏んだ/回避した地雷
+- DuckDB の SQL syntax: 文字列引用は二重引用符でなく単一引用符必須 (\"2026-05-12\"でなく'2026-05-12')
+- `Decimal` 型の演算: float() への明示cast 必要 (純pyの int/float と Decimal 混在で TypeError)
+- 年率換算は粗い (×24倍)、季節性無視 → 「数倍は確実、精密値は forward 30日で再確認」と honest tone
+
+### 教訓
+- **commission overhead は構造的問題**: 戦略のexit/entry をいくら改善しても 22bps の物理コストは消えない
+- **AGI fund 構想 ⊃ broker選定**: API有 + commission低 の交点が現実解 → kabu (Windows VM経由)
+- **retrospective 試算は LIVE移行判断の最高ROIデータ**: 1時間で「BNF撤退 vs broker移行」の決定材料
+
+### 次に同じことをする人への注意
+- forward paper も MockKabuComClient で並行検証可 (Phase 2 完了前でも `--mock-broker kabu` で simulate可能、要 main.py 改修)
+- p5m/p30m は n=7 で年率換算は信頼性低い (p50m n=105 が一番信頼可)
+- 年率換算 14日 × ~17倍は 季節性/レジーム変動 を完全無視 → 30日 forward で再確認必須
+
+---
+
 ## 2026-05-25 (PM3) — auカブコム kabuステーション API 対応スケルトン
 
 ### 何を作ったか
