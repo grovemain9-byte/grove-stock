@@ -39,7 +39,17 @@ class StrategyParams:
     consensus_min: int = 3
     stop_loss: float = -0.07
     max_hold_days: int = 15
-    take_profit_dev: float = 0.0  # deviation >= 0 で利確（MA25回帰）
+    # 2026-05-25 令和式 BNF exit層改修:
+    # - take_profit_dev 0.0 → 0.02: MA25回帰でなく +2%乖離プラスで利確 (Honda asymmetric_tp)
+    # - take_profit priority を signal_reversal より前 に格上げ (旧: signal_reversal が先勝ち
+    #   で take_profit 0件発火 だった病巣修正)
+    # - trailing_stop: +1.5%到達後、pick から -1% 下落で exit (max +2.69% avg 捕捉)
+    # - gap_down_stop: 寄付き値が entry の -3% 以下で即exit (-7%設計stop_loss が gap で
+    #   -7~-8.5% にずれる問題を緩和)
+    take_profit_dev: float = 0.02  # deviation >= +0.02 で利確 (旧 0.0 / Honda asymmetric_tp)
+    trailing_activation_pct: float = 0.015  # +1.5% touched で trailing 活性化
+    trailing_drawdown_pct: float = 0.01     # peak から -1% で exit
+    gap_down_stop_pct: float = -0.03        # 寄付きが entry-3% 以下で即exit
     max_concurrent: int = 7
     # --- Kelly 配分 (kelly.py) tuple-of-tuples=不変 ---
     kelly_alloc: tuple[tuple[int, float], ...] = ((3, 0.10), (4, 0.15), (5, 0.20))

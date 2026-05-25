@@ -1,5 +1,73 @@
 # grove-stock 建築日誌
 
+## 2026-05-25 (PM2) — 令和式 BNF exit層 全面改修 (3点同時)
+
+### 何を作ったか (commit 待ち)
+- `config/strategy_params.py`: take_profit_dev 0.0→**0.02** (asymmetric_tp Honda)、trailing_activation_pct=0.015 / trailing_drawdown_pct=0.01 / gap_down_stop_pct=-0.03 追加
+- `src/data/db.py`: positions に `max_price_seen` カラム追加 + exit_reason CHECK に `gap_down_stop`/`trailing_stop` 追加
+- `src/monitor.py`: 4条件 → **7条件 + 新priority順** 全面リライト
+  - 旧: news → stop_loss → max_hold → take_profit(MA25回帰 dev>=0) → signal_reversal
+  - 新: news → **gap_down_stop** → stop_loss → **take_profit(dev>=+2%)** → **trailing_stop** → max_hold → signal_reversal
+- `src/monitor.py:run_monitor_cycle`: max_price_seen NULL backfill + max更新 logic
+- `tests/test_monitor_graph.py`: 既存4 test を新priority対応 + 新7 test (gap_down 2 / trailing 3 / priority 1 / threshold 1)
+
+### なぜ (counterfactual分析根拠)
+2026-05-25 (b) exit_reason 深掘り分析で判明:
+1. **take_profit (MA25回帰 dev>=0) は 102件中 0件発火** — signal_reversal (consensus<3) が必ず先勝ち、Honda's `asymmetric_tp` 提案も同様に発火しない設計バグ
+2. **stop_loss -7% 実際は -7~-8.5%** — gap downで fill が悪化 (5/17/5/20 の 70030/58030 全敗の主因)
+3. **trailing なし** で max +2.69% avg 取り逃し (exit +0.91% avg、35% capture率のみ)
+4. signal_reversal counterfactual:
+   - +5日後 avg +0.96% (現状 +0.91% とほぼ同じ) → extended_hold 効果薄
+   - 31% positions が max +1pp余地 → asymmetric_tp で取れる
+   - 7% は -5%超下落 (extended_holdすると新 stop_loss を生む)
+
+### 令和式 BNF 改修の3-layer 設計
+
+```
+┌──────────────────────────────────────┐
+│ Layer 1: gap_down_stop (新規)        │
+│ 寄付き ≤ entry × (1 - 0.03)          │
+│ → stop_loss -7% の gap drift を補完  │
+├──────────────────────────────────────┤
+│ Layer 2: take_profit (priority変更)  │
+│ dev ≥ +0.02 (旧 +0.0)                │
+│ → signal_reversal より前で評価       │
+│ → Honda asymmetric_tp 哲学を実装     │
+├──────────────────────────────────────┤
+│ Layer 3: trailing_stop (新規)        │
+│ max_price_seen が entry+1.5% 到達後  │
+│ current ≤ max × (1 - 0.01) → exit    │
+│ → max +2.69% avg のうち 1.5%+ 捕捉   │
+└──────────────────────────────────────┘
+```
+
+### 期待効果 (counterfactual 試算)
+- avg gross +0.91% → **+1.5~2.0% 目標** (capture率 35%→60%)
+- stop_loss avg -5.75% → **-5.0%目標** (gap_down で早期 exit)
+- net pnl (10日 forward) -¥147K → **+¥100K 圏内** 期待
+
+### 途中で踏んだ/回避した地雷
+- `_make_df` helper が `open == close` を default 設定 → 既存 stop_loss / max_hold test が新 gap_down_stop に誤誘導された
+  → 各 test で `df.loc[df.index[-1], "open"] = ...` で open を別途指定して回避
+- exit_reason CHECK 制約を更新せず `gap_down_stop` を insert すると CHECK fail → schema migration 同時 commit 必須
+- max_price_seen 既存 open positions の backfill: `UPDATE ... WHERE max_price_seen IS NULL` を run_monitor_cycle 冒頭で実行 (冪等)
+
+### 検証結果
+- 全 monitor_graph test 15 pass (旧 9 + 新 6)
+- 全 regression 368 pass (1 deselected pre-existing flake)
+- 次 12:30 cron scan で実効 forward verify 予定:
+  - logs/scan.log で gap_down/trailing 発火数 grep
+  - positions の exit_reason に新値が記録されるか
+
+### 次に同じことをする人への注意
+- monitor.py の exit priority変更は **DB schema (CHECK constraint) と整合** させる必要あり
+- trailing stop の max_price_seen は **同scan内で current_price > max なら DB write**、コスト軽微だが closed positions には残らない (closed_at時の DB状態が記録)
+- TAKE_PROFIT_DEV=+0.02 は Honda asymmetric_tp の数値であり、**令和式の core変数**。将来 sweep対象
+- gap_down_stop の閾値 -3% は Grove未承認、forward paper で実効を見てtune
+- trailing_activation_pct=+1.5% は counterfactual の +2.69%max を基に設定。低すぎると false trailing多発、高すぎると未活性多発
+
+---
+
 ## 2026-05-25 (PM) — max_concurrent 再拡張 + F9同scan累積fix + sector pattern matching (commit 1dcd089)
 
 ### 何を作ったか

@@ -1,7 +1,19 @@
-"""monitor_graph: 既存ポジション監視・エグジット。
+"""monitor_graph: 既存ポジション監視・エグジット (令和式 BNF 2026-05-25改修)。
 
-Issue #7: monitor_node → exit_node。
-4条件: 損切り(-5%) / 最大保有(5営業日) / 利確(MA25回帰) / 反転シグナル。
+7条件 (priority high→low):
+  0. news_negative (EDINET 開示 negative)
+  1. gap_down_stop (寄付き値 entry-3% 以下で即exit、stop_loss が gap downで -8%にずれる問題緩和)
+  2. stop_loss (現価-7%以下、stop_loss_pct)
+  3. take_profit (MA25乖離 >= +2%、Honda asymmetric_tp)
+  4. trailing_stop (max +1.5%到達後、peak から -1% で逃げる、+2.69% max 捕捉)
+  5. max_hold (15営業日)
+  6. signal_reversal (consensus<3、最終 fallback に降格)
+
+2026-05-25 改修根拠 (counterfactual分析):
+  - 旧設計: take_profit は signal_reversal が先勝ちで 0件発火 (consensus<3 が必ず早い)
+  - 旧設計: stop_loss -7%設計だが gap で -7~-8.5% にずれていた (10件全敗の主因)
+  - 旧設計: trailing なし → max +2.69% avg 取り逃し (exit +0.91%、35% capture率)
+  - 修正: take_profit priority格上げ + asymmetric (+2%) で 31% positions が +1pp改善
 """
 from __future__ import annotations
 
@@ -23,11 +35,14 @@ from config.strategy_params import DEFAULTS
 
 logger = logging.getLogger("monitor_graph")
 
-# S3: 単一ソース DEFAULTS 参照（値は現値 -0.07/15 と同一＝挙動保存）
-# 2026-05-24: MAX_CONCURRENT_POSITIONS は kelly_node 内で book別管理へ移行 (commit c9254b4)
-# monitor.py は同時保有上限を参照しないため削除
+# S3: 単一ソース DEFAULTS 参照
 STOP_LOSS_PCT = DEFAULTS.stop_loss
 MAX_HOLD_DAYS = DEFAULTS.max_hold_days
+# 令和式 exit params (2026-05-25)
+TAKE_PROFIT_DEV = DEFAULTS.take_profit_dev  # MA25乖離率 >= +0.02 で利確
+TRAILING_ACTIVATION_PCT = DEFAULTS.trailing_activation_pct  # +1.5% touched で活性化
+TRAILING_DRAWDOWN_PCT = DEFAULTS.trailing_drawdown_pct      # peak から -1% で exit
+GAP_DOWN_STOP_PCT = DEFAULTS.gap_down_stop_pct              # 寄付き-3%以下で即exit
 ALLOWED_REGIME_ONLY_BEARISH = True  # 2026-04-21: Nikkei MA25乖離 <= -3%の時のみentry
 
 
@@ -84,13 +99,29 @@ def monitor_node(state: MonitorState) -> dict:
         if isinstance(entry_date, str):
             entry_date = date.fromisoformat(entry_date)
         pos_id = pos["id"]
+        max_price_seen = pos.get("max_price_seen") or entry_price
 
         try:
             df = fetch_daily_ohlcv(ticker)
             current_price = float(df["close"].iloc[-1])
+            today_open = float(df["open"].iloc[-1]) if "open" in df.columns else current_price
         except Exception as e:
             errors.append(f"monitor:{ticker}:{e}")
             continue
+
+        # max_price_seen 更新 (trailing stop用) - DB write
+        new_max = max(float(max_price_seen), current_price)
+        if new_max > float(max_price_seen):
+            try:
+                con = get_connection(db_path)
+                con.execute(
+                    "UPDATE positions SET max_price_seen = ? WHERE id = ?",
+                    [new_max, pos_id],
+                )
+                con.close()
+            except Exception as e:
+                errors.append(f"max_price_update:{ticker}:{e}")
+        max_price_seen = new_max
 
         # ⓪ news_negative 最優先exit (開示検出)
         if ticker in neg_map:
@@ -106,7 +137,19 @@ def monitor_node(state: MonitorState) -> dict:
                 pass
             continue
 
-        # ① 損切り: -5%以下
+        # ① 寄付きgap_down stop (令和式 2026-05-25): 寄付きが entry の -3% 以下で即exit
+        # 旧 stop_loss -7% は gap で -7~-8.5% にずれていた問題への対処
+        gap_pct = (today_open - entry_price) / entry_price
+        if gap_pct <= GAP_DOWN_STOP_PCT:
+            exit_decisions.append({
+                "id": pos_id, "ticker": ticker, "shares": shares,
+                "reason": "gap_down_stop", "current_price": today_open,
+            })
+            logger.info("[gap_down] %s open %.1f vs entry %.1f (%.2f%%)",
+                        ticker, today_open, entry_price, gap_pct*100)
+            continue
+
+        # ② 損切り: -7%以下 (current close base)
         pnl_pct = (current_price - entry_price) / entry_price
         if pnl_pct <= STOP_LOSS_PCT:
             exit_decisions.append({
@@ -115,19 +158,12 @@ def monitor_node(state: MonitorState) -> dict:
             })
             continue
 
-        # ② 最大保有期間: 5営業日
-        hold_days = _business_days_between(entry_date, today)
-        if hold_days >= MAX_HOLD_DAYS:
-            exit_decisions.append({
-                "id": pos_id, "ticker": ticker, "shares": shares,
-                "reason": "max_hold", "current_price": current_price,
-            })
-            continue
-
-        # ③ 利確: MA25回帰（乖離率 >= 0）
+        # ③ take_profit 優先化 (令和式 Honda asymmetric_tp): MA25乖離 >= +2%
+        # 旧: dev>=0、かつ signal_reversal の後で発火 0件
+        # 新: dev>=TAKE_PROFIT_DEV(+0.02)、signal_reversal より前で評価
         try:
             deviation = calc_ma25_deviation(df)
-            if deviation >= 0:
+            if deviation >= TAKE_PROFIT_DEV:
                 exit_decisions.append({
                     "id": pos_id, "ticker": ticker, "shares": shares,
                     "reason": "take_profit", "current_price": current_price,
@@ -136,7 +172,31 @@ def monitor_node(state: MonitorState) -> dict:
         except Exception:
             pass
 
-        # ④ 反転シグナル: consensus < 3
+        # ④ trailing_stop (令和式): max +1.5%到達後、peak から -1% drawdown で exit
+        # max +2.69% avg 取り逃し問題への対処、35% capture → 60%目標
+        trailing_active = max_price_seen >= entry_price * (1 + TRAILING_ACTIVATION_PCT)
+        if trailing_active:
+            trailing_trigger = max_price_seen * (1 - TRAILING_DRAWDOWN_PCT)
+            if current_price <= trailing_trigger:
+                exit_decisions.append({
+                    "id": pos_id, "ticker": ticker, "shares": shares,
+                    "reason": "trailing_stop", "current_price": current_price,
+                })
+                pnl_locked = (current_price - entry_price) / entry_price * 100
+                logger.info("[trailing] %s max %.1f → %.1f (locked %.2f%%, entry %.1f)",
+                            ticker, max_price_seen, current_price, pnl_locked, entry_price)
+                continue
+
+        # ⑤ 最大保有期間: 15営業日
+        hold_days = _business_days_between(entry_date, today)
+        if hold_days >= MAX_HOLD_DAYS:
+            exit_decisions.append({
+                "id": pos_id, "ticker": ticker, "shares": shares,
+                "reason": "max_hold", "current_price": current_price,
+            })
+            continue
+
+        # ⑥ 反転シグナル: consensus < 3 (令和式: 最終 fallback に降格)
         try:
             _loop = asyncio.new_event_loop()
             try:
@@ -270,14 +330,20 @@ def run_monitor_cycle(
     positions = []
     try:
         con = get_connection(db_path)
+        # max_price_seen がNULLなら entry_price で initialize (backfill)
+        con.execute(
+            "UPDATE positions SET max_price_seen = entry_price "
+            "WHERE status='open' AND max_price_seen IS NULL"
+        )
         rows = con.execute("""
-            SELECT id, ticker, entry_price, shares, entry_date
+            SELECT id, ticker, entry_price, shares, entry_date, max_price_seen
             FROM positions WHERE status = 'open'
         """).fetchall()
         for r in rows:
             positions.append({
                 "id": r[0], "ticker": r[1], "entry_price": r[2],
                 "shares": r[3], "entry_date": r[4],
+                "max_price_seen": r[5] if r[5] is not None else r[2],
             })
         con.close()
     except Exception as e:
