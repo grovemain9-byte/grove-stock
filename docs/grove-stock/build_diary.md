@@ -1,5 +1,64 @@
 # grove-stock 建築日誌
 
+## 2026-05-25 — Portfolio-aware 3層 cap制約 (forward paper 1日目発見の二次バグ修正)
+
+### 何を作ったか
+- `src/sizing/router.py`: `compute_portfolio_aware_shares()` 新関数 + `SINGLE_TICKER_MAX=0.15`定数
+- `src/main.py:kelly_node`: 新関数を経由してshares算出、`slot_limited`/`ticker_ceiling`/`cash_limited`を logger.info で診断
+- `tests/test_router.py`: `TestPortfolioAwareShares` 7テスト追加
+- `tests/test_strategy_params.py`: monitor.py:29 削除のimport修正
+
+### なぜ（背景）
+commit c9254b4 (max_concurrent + consensus DESC) は1日で `max_concurrent_full pass率 82%→0.8%` を達成。だが翌日 forward paper 1日目 (2026-05-25 9:00) の verify_max_concurrent_fix.sh 実行で **二次バグが即露呈**:
+- **shares_zero 32.3%** (うち p50m 96%): 4件入った後に資金枯渇
+- **Insufficient balance エラー** (p10m): 6件入った後 7件目で cash 不足
+- **集中度過剰**: p50m が 19250+85930 の2銘柄で 70.6%
+
+p50m 4件で resorting:
+- 19250 ¥17.4M (34.8%) + 85930 ¥17.9M (35.8%) + 42200 ¥14.7M (29.4%) + 29310 ¥0.04M = ¥50.1M ← **資金100%使い切り**
+- 残り (consensus=4 7件 + consensus=3 75件) は全て shares_zero
+
+### 根本原因
+Phase 0+ サイジング層は **単体トレード最適化** のみ。cap [2%, 70%] のまま max_concurrent を 7→20 に拡げると、「先勝ち最大cap」で 3-4件で資金100%消費する。**「ポートフォリオ視点」の cap_max動的縮小** が欠けていた。
+
+### 3層の設計
+1. **Layer 1 (slot-aware)**: `max_value = free_cash / slots_left`
+   - 残スロットで均等配分した場合の上限
+   - 後続トレード用の cash を残す
+2. **Layer 2 (cash hard limit)**: `max_value <= free_cash`
+   - 実 cash を超えるオーダーは絶対不可 (Insufficient balance防止)
+3. **Layer 3 (single ticker absolute)**: `max_value <= capital * 0.15`
+   - 1銘柄あたりの集中度を絶対量で制限 (default 15% of equity)
+
+優先順位: Layer 1 → Layer 3 → Layer 2 (一番厳しいものが勝つ設計)
+
+### 途中で踏んだ/回避した地雷
+- dead code削除 (monitor.py:29 MAX_CONCURRENT_POSITIONS) が test_strategy_params.py のimport を壊した → grepで全使用箇所確認すべきだった
+- `compute_portfolio_aware_shares` を `shares_from_decision` に統合せず別関数化 → 既存テスト (`shares_from_decision`) との backward-compat 維持
+- `_sizing_reason` を最初は `_` prefix で捨てていた → diagnostic value 高いので logger.info で出力に変更
+- council_reason の "kelly_ok"/"shares_zero" 文字列は既存testで exact match されてるので変更せず (将来 column追加 for layer info)
+
+### 検証結果（数字）
+- TestPortfolioAwareShares 7テスト全pass
+- 関連73テスト 全pass (router/multibook/scan_graph/monitor_graph/strategy_params)
+- 期待効果 (12:30 scan で確認):
+  - p50m 4件→10-20件に分散
+  - 1銘柄notional ¥17M → ≤¥7.5M (15% ceiling)
+  - shares_zero 32% → 大幅減少
+
+### 次に同じことをする人への注意
+- ポートフォリオレベル制約は「合計cash使い切り防止」が core。slot×cash の2軸で考える
+- `SINGLE_TICKER_MAX=0.15` はハードコード。後で `config/strategy_params.py` へ移動推奨
+- `compute_portfolio_aware_shares` の effective_cap_pct 返り値は **未だ DB記録されていない**。layer診断を本格化するなら decision_shadow に `sizing_layer` column追加が必要
+- forward paper の **bottleneck移動法則**: 1つ直すと次のlayer制約が露出する。1サイクル/日で観察すべし
+
+### 教訓
+- max_concurrent の数値だけ変えても、cap_pct 上限を据置 だと「先勝ち最大cap」で同じ結果
+- **「動的に勝てる」= 単体最適 + ポートフォリオ最適 の二段** が原則
+- forward paper 1日目で問題発見→同日内修正→次scan検証 = **「観察→修正→再検証」サイクル24h以内** が動的進化の最小単位
+
+---
+
 ## 2026-05-24 — book別 max_concurrent + consensus DESC ソート (commit c9254b4)
 
 ### 何を作ったか

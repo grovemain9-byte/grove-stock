@@ -16,7 +16,9 @@ from src.sizing.plt import (
 from src.sizing.router import (
     EXPLORE_CAP_MAX,
     EXPLORE_CAP_MIN,
+    SINGLE_TICKER_MAX,
     SizingDecision,
+    compute_portfolio_aware_shares,
     decide_cap,
     shares_from_decision,
 )
@@ -213,5 +215,100 @@ class TestSharesFromDecision:
         )
         # 100K * 0.2 = 20K, price 4000 → 0 shares, even flex can't (need 400K for 1 unit)
         shares, reason = shares_from_decision(decision=d, capital=100_000, price=4000, flex=True)
+        assert shares == 0
+        assert reason == "shares_zero"
+
+
+# === Portfolio-aware 3-layer constraints (2026-05-25) ===
+
+class TestPortfolioAwareShares:
+    """compute_portfolio_aware_shares: Layer 1 slot / Layer 2 cash / Layer 3 ticker."""
+
+    def _decision(self, cap_pct: float = 0.30) -> SizingDecision:
+        return SizingDecision(
+            cap_pct=cap_pct, source="plt_hot", cell_id="x", cell_n_samples=20,
+            cell_confidence="hot", exploration_flag=False, fallback_used=False,
+        )
+
+    def test_layer1_slot_limits_when_per_slot_smaller_than_cap(self):
+        """残slots=10, free_cash=¥10M → per_slot ¥1M < cap_value ¥15M → slot_limited."""
+        d = self._decision(cap_pct=0.30)  # 50M*0.3=15M原案
+        shares, reason, eff = compute_portfolio_aware_shares(
+            decision=d, capital=50_000_000, free_cash=10_000_000,
+            price=1000, flex=False, slots_left=10,
+        )
+        # per_slot = 10M/10 = 1M, ticker_ceiling = 50M*0.15 = 7.5M
+        # → slot wins (smallest), 1M / 1000 = 1000 shares
+        assert reason == "slot_limited"
+        assert shares == 1000
+        assert abs(eff - 0.02) < 0.001  # 1M/50M = 2%
+
+    def test_layer3_single_ticker_ceiling_caps_at_15pct(self):
+        """capital=50M, free_cash=40M, slots=2 (大kuhuni) → ticker_ceiling 7.5M が効く."""
+        d = self._decision(cap_pct=0.50)  # 50M*0.5=25M原案
+        shares, reason, eff = compute_portfolio_aware_shares(
+            decision=d, capital=50_000_000, free_cash=40_000_000,
+            price=1000, flex=False, slots_left=2,
+        )
+        # per_slot = 40M/2 = 20M, ticker_ceiling = 7.5M → ticker wins
+        assert reason == "ticker_ceiling"
+        assert shares == 7500  # 7.5M / 1000
+        assert abs(eff - SINGLE_TICKER_MAX) < 0.001
+
+    def test_layer2_cash_limited_when_free_cash_small(self):
+        """free_cash=¥500K, slots=1 → cap_value=15M, per_slot=500K, ticker_ceiling=7.5M
+        → 500K (cash) wins."""
+        d = self._decision(cap_pct=0.30)
+        shares, reason, eff = compute_portfolio_aware_shares(
+            decision=d, capital=50_000_000, free_cash=500_000,
+            price=1000, flex=False, slots_left=1,
+        )
+        # per_slot = 500K/1 = 500K (= free_cash). cash_limited only when slot ≠ cash.
+        # Here per_slot == free_cash, so reason stays "slot_limited" (first match)
+        assert reason in ("slot_limited", "cash_limited")
+        assert shares == 500  # 500K / 1000
+
+    def test_p50m_real_case_4th_trade_should_not_zero(self):
+        """forward paper の p50m 病理再現: 3件入った後の4件目が shares_zero になっていた問題.
+
+        現実値: equity=50M, 3件で ¥45M 使い、free_cash=¥5M、slots_left=17 (=20-3)
+        従来: cap_value = 50M * 0.30 = 15M → 5M(free) 超えて shares_zero
+        修正後: per_slot = 5M/17 = ¥294K → 294K/1000 = 200株 (建つ)
+        """
+        d = self._decision(cap_pct=0.30)
+        shares, reason, eff = compute_portfolio_aware_shares(
+            decision=d, capital=50_000_000, free_cash=5_000_000,
+            price=1000, flex=False, slots_left=17,
+        )
+        assert shares > 0  # 旧コードでは 0 だった
+        assert reason == "slot_limited"
+
+    def test_zero_cap_returns_zero_regardless(self):
+        d = self._decision(cap_pct=0.0)
+        shares, reason, eff = compute_portfolio_aware_shares(
+            decision=d, capital=50_000_000, free_cash=50_000_000,
+            price=1000, flex=True, slots_left=20,
+        )
+        assert shares == 0
+        assert reason == "shares_zero"
+
+    def test_flex_min_unit_when_cap_layers_zero_it(self):
+        """flex=True で 3層cap が 0株まで圧縮しても free_cash で1単元買えれば建つ."""
+        d = self._decision(cap_pct=0.50)
+        # capital=1M, free_cash=400K, slots=20 → per_slot=20K → cap_layers cuts to 0株
+        # But free_cash 400K >= price*100=400K → flex_min_unit
+        shares, reason, eff = compute_portfolio_aware_shares(
+            decision=d, capital=1_000_000, free_cash=400_000,
+            price=4000, flex=True, slots_left=20,
+        )
+        assert shares == 100
+        assert reason == "flex_min_unit"
+
+    def test_no_free_cash_returns_zero(self):
+        d = self._decision(cap_pct=0.30)
+        shares, reason, eff = compute_portfolio_aware_shares(
+            decision=d, capital=50_000_000, free_cash=0,
+            price=1000, flex=True, slots_left=20,
+        )
         assert shares == 0
         assert reason == "shares_zero"

@@ -494,10 +494,12 @@ def kelly_node(state: ScanState) -> dict:
         price = float(df["close"].iloc[-1])
 
         # v2 (Phase 0+): EVS あり + router_con あり → PLT lookup based sizing
+        # + Portfolio-aware 3層制約 (2026-05-25): slot/cash/single_ticker
         sizing_decision: SizingDecision | None = None
         if evs_comp is not None and router_con is not None:
             try:
                 from src.sizing.plt import assign_rsi_bin  # noqa: F401  (used via decide_cap)
+                from src.sizing.router import compute_portfolio_aware_shares
                 rsi_for_bin = _extract_indicators(df).get("rsi") or 20.0
                 sizing_decision = decide_cap(
                     con=router_con, components=evs_comp,
@@ -505,10 +507,25 @@ def kelly_node(state: ScanState) -> dict:
                     nikkei_ma25_dev=nikkei_ma25_dev,
                     ticker=ticker, decided_date=today,
                 )
-                cap_value = equity * sizing_decision.cap_pct
-                shares = int(cap_value / price / 100) * 100
-                if flex and shares == 0 and equity >= price * 100 and sizing_decision.cap_pct > 0:
-                    shares = 100  # flex min-1-unit
+                # 残スロット = max_concurrent - (open_count + 今回の position_size 既決定数)
+                slots_remaining_now = max(slots_left - len(position_size), 1)
+                shares, sizing_reason, effective_cap = compute_portfolio_aware_shares(
+                    decision=sizing_decision,
+                    capital=equity,
+                    free_cash=remaining_cash,
+                    price=price,
+                    flex=flex,
+                    slots_left=slots_remaining_now,
+                )
+                # 3層 cap適用 diagnostic log (2026-05-25)
+                # forward paper で「どのlayerがcapを抑制したか」を追跡
+                if sizing_reason in ("slot_limited", "ticker_ceiling", "cash_limited"):
+                    logger.info(
+                        "[%s] %s sizing limited by %s: raw_cap=%.3f → eff_cap=%.3f (free_cash=%.0f, slots_left=%d)",
+                        book or "legacy", ticker, sizing_reason,
+                        sizing_decision.cap_pct, effective_cap,
+                        remaining_cash, slots_remaining_now,
+                    )
             except Exception as e:
                 errors.append(f"router:{ticker}:{e}")
                 # Fallback to legacy kelly_size

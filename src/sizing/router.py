@@ -52,6 +52,12 @@ logger = logging.getLogger("sizing.router")
 EXPLORE_CAP_MIN = 0.10
 EXPLORE_CAP_MAX = 0.50  # Slightly lower than CAP_CEILING to avoid wild bets in探索
 
+# 2026-05-25: Portfolio-aware constraints (3 layers)
+# 単体トレード最適化 (cap_pct) だけでなく、ポートフォリオ全体での
+# 資金枯渇/集中過剰を防ぐ。max_concurrent 拡張後に「先勝ち最大cap」型で
+# p50m 4件で資金100%枯渇した問題 (forward paper 2026-05-25) の修正。
+SINGLE_TICKER_MAX = 0.15  # Layer 3: 1銘柄あたり絶対上限 (book資金の15%)
+
 
 @dataclass(frozen=True)
 class SizingDecision:
@@ -209,9 +215,11 @@ def shares_from_decision(
     price: float,
     flex: bool,
 ) -> tuple[int, str]:
-    """Convert a SizingDecision into actual share count.
+    """Convert a SizingDecision into actual share count (legacy interface).
 
     Mirrors evs.evs_size logic but uses the router's chosen cap.
+    Backward-compat shim: ポートフォリオ制約なし。
+    新規コードは compute_portfolio_aware_shares() を使うこと。
 
     Args:
         decision: from decide_cap()
@@ -237,3 +245,76 @@ def shares_from_decision(
         return 0, "shares_zero"
 
     return shares, "router_cap"
+
+
+def compute_portfolio_aware_shares(
+    *,
+    decision: SizingDecision,
+    capital: float,
+    free_cash: float,
+    price: float,
+    flex: bool,
+    slots_left: int,
+    single_ticker_max: float = SINGLE_TICKER_MAX,
+) -> tuple[int, str, float]:
+    """3層 cap制約を適用した株数算出 (2026-05-25 追加).
+
+    max_concurrent 拡張後の「先勝ち最大cap → 残スロット全部shares_zero」問題を解決。
+
+    Layer 1 (slot-aware): max_value = free_cash / slots_left
+      残スロットで均等配分した場合の上限。後続トレード用の cash を残す。
+    Layer 2 (cash hard limit): max_value <= free_cash
+      実 cash を超えるオーダーは不可能 (Insufficient balance防止)。
+    Layer 3 (single ticker absolute): max_value <= capital * single_ticker_max
+      1銘柄あたりの集中度を絶対量で制限 (default 15% of equity)。
+
+    Args:
+        decision: from decide_cap()
+        capital: book equity (¥)
+        free_cash: book_free_cash (¥) — 現時点の残現金
+        price: current share price (¥)
+        flex: True で最低1単元保証 (when free_cash allows)
+        slots_left: 残スロット数 (max_concurrent - 既にfilled + 自身を含む)
+        single_ticker_max: Layer 3 ceiling (default SINGLE_TICKER_MAX=0.15)
+
+    Returns:
+        (shares, sizing_reason, effective_cap_pct)
+        sizing_reason ∈ {"router_cap", "slot_limited", "ticker_ceiling",
+                         "cash_limited", "flex_min_unit", "shares_zero"}
+        effective_cap_pct: 適用後の実効 cap (decision_shadow 記録用)
+    """
+    if capital <= 0 or price <= 0 or decision.cap_pct <= 0 or free_cash <= 0:
+        return 0, "shares_zero", 0.0
+
+    # Layer 0: PLT/EVSが決めた raw cap
+    effective_value = capital * decision.cap_pct
+    reason = "router_cap"
+
+    # Layer 1: slot-aware (残スロットで均等配分の上限)
+    if slots_left > 0:
+        per_slot_max = free_cash / slots_left
+        if per_slot_max < effective_value:
+            effective_value = per_slot_max
+            reason = "slot_limited"
+
+    # Layer 3: single ticker absolute ceiling (15% of equity)
+    ticker_ceiling = capital * single_ticker_max
+    if ticker_ceiling < effective_value:
+        effective_value = ticker_ceiling
+        reason = "ticker_ceiling"
+
+    # Layer 2: cash hard limit (絶対無理ライン)
+    if free_cash < effective_value:
+        effective_value = free_cash
+        reason = "cash_limited"
+
+    shares = int(effective_value / price / 100) * 100
+
+    # flex最低1単元保証 (free_cash で1単元買えるなら)
+    if flex and shares == 0 and free_cash >= price * 100:
+        return 100, "flex_min_unit", (price * 100) / capital
+
+    if shares == 0:
+        return 0, "shares_zero", 0.0
+
+    return shares, reason, effective_value / capital
