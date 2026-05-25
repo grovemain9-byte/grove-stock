@@ -1,5 +1,91 @@
 # grove-stock 建築日誌
 
+## 2026-05-25 (PM5) — 令和式 per-book playbook (Layer 7/8/9/10) — universal scalable BNF (commit 660d5ea)
+
+### 何を作ったか
+- `config/books.py` 大幅拡張:
+  - Book NamedTuple に `price_min`, `price_max`, `consensus_min_override`, `routing_priority` 追加
+  - SKIP_PRICE_RANGES = ((3000, 5000),) universal disaster zone
+  - is_price_in_skip_range / is_price_book_acceptable helpers
+  - **auto_select_book(equity)** function — 任意資金から最適 playbook 選択
+- `src/main.py:kelly_node`: Layer 7/8 filter (price + consensus override) + Layer 9 cross-book dedup
+- `src/main.py:run_paper_multibook`: sorted_books by routing_priority DESC + globally_taken_tickers set
+- `tests/test_multibook.py`: TestPerBookPlaybook 6テスト追加
+
+### なぜ (Grove vision)
+> 「どんな資金からでも令和式BNF戦略で資産運用できます。動的にスタート資金に合わせてそれぞれ最適に最高益を出せるように」
+
+旧アーキテクチャ (5/24-5/25 朝までの 8 commits) は **「one-size-fits-all」**: 全 book に同じ playbook を適用、cap absolute額だけ差をつけていた。結果:
+- p50m: +24%/年 (kabu想定)
+- p10m: -26%/年 (赤字)
+- p1m: -11%/年 (赤字)
+→ Grove vision「universal scalable」不達
+
+Phase 1 data分析 (retrospective n=198 trades, 5/12-5/25) で 真の解判明:
+- consensus=3 → all books loss-generator (avg -0.12% kabu)
+- consensus=4 → all books winners (win 55-69%, gross +2.5-2.9%)
+- price band 3000-5000 → disaster across all books (win 10.6%, -¥1.6M kabu)
+- 同銘柄 3.26x duplicate (225 trades / 69 unique signals) → commission 浪費
+
+### 4 layer 設計と各 layer の根拠
+
+**Layer 7 (universe filter per book)**:
+- p1m price 500-3000: 1単元 fits ¥1M (¥3000×100=¥300K cap 30%)
+- p50m price 500-50000: 制限最小、大資金は流動性大型株フル活用
+- 全 book で SKIP_PRICE_RANGES (3000-5000) — Phase 1 data の disaster zone
+
+**Layer 8 (consensus override)**:
+- 全 book consensus_min_override=4 (旧 CLAUDE.md core =3 から strengthening)
+- Phase 1: p50m consensus=4 で win 69.2%, gross +2.87% (vs consensus=3 で win 29%, -0.12%)
+- consensus=3 を完全排除して取引数減 → commission削減 + 勝率上昇
+
+**Layer 9 (cross-book signal routing)**:
+- routing_priority DESC (p50m=5 > p30m=4 > p10m=3 > p5m=2 > p1m=1)
+- globally_taken_tickers set で 1 signal → 1 book のみ割当
+- council_reason="cross_book_dedup" で後続 book は pass記録
+- 効果: 225 trades → 69 unique = commission 1/3.26 削減
+
+**Layer 10 (動的 capital tier)**:
+- auto_select_book(equity) で任意資金から最適 playbook
+- ¥1M-3M → p1m / ¥3M-8M → p5m / ¥8M-20M → p10m / ¥20M-40M → p30m / ¥40M+ → p50m
+- 新規ユーザーが ¥500K でも ¥1B でも universal に対応
+
+### 途中で踏んだ/回避した地雷
+- 既存テストの consensus=3 + ¥3000 mock data が新 Layer 7/8 で全部弾かれた
+  → **`book_price_min > 0` ガード** を kelly_node に入れた (legacy/test path は filter 無効化、本番 config からのみ filter適用)
+- `test_negative_free_cash`: 旧 design「他 book が同 signal を取れる」前提だったが Layer 9 dedup で p50m が先取 → assertion を `other_open >= 1` に書換え (priority上位の any book)
+- `tests/test_multibook.py:test_kelly_node_fills_strongest_consensus_first` を一度 method-renamed しかけた (戻した)
+
+### 検証結果
+- TestPerBookPlaybook 6新規 test pass
+- 30 multibook tests pass / **392 full regression pass** (前回 368 から +24)
+- 5/25 20:25 manual scan で実環境動作確認:
+  - cross_book_dedup council_reason 12件発火
+  - price_filter (3000/3194/3525/3543/3741/4110/4165/5398) 36件発火
+  - signal 重複が大資金 book 優先で吸収されている
+
+### 期待効果 (Phase 1 hypothesis ベース、forward で再確認必要)
+- consensus=4 強制: 取引数 60件/日 → 30-40件/日 (signal 質厳選)
+- price filter (3000-5000 skip): -¥1.6M loss zone を完全回避
+- cross-book dedup: commission 1/3.26 削減 (kabu想定でも spread/slippage削減)
+- universal scalable: ¥500K でも ¥1B でも 各 book playbook で auto-optimize
+
+### 次に同じことをする人への注意
+- **Layer 7 filter は `book_price_min > 0` で guard 必須** (legacy/test path 互換性)
+- Layer 9 dedup は `routing_priority DESC sort` 必須 (大資金優先しないと小資金で commission 浪費)
+- consensus_min_override=4 は CLAUDE.md core「3/5以上」の **strengthening override** (削除でなく上書き)、Phase 1 hypothesis が forward で覆ったら 3 に戻す
+- auto_select_book は **Layer 10 で book を1つ選ぶ**設計 (5 book 並列でなく単一 playbook 適用)
+  - 現状の run_paper_multibook は 5 book 並列 (A/B paper)、auto_select_book は LIVE単一 book 用途
+  - LIVE移行時 (Phase 2 kabu broker) に切替
+
+### 教訓
+- **vision を最初に確認**: branch `reiwa-engine-params` + CLAUDE.md + Grove発言「universal scalable」を session開始時に把握すべきだった (今回も「one-size-fits-all 不適合」を Grove に指摘されてから動いた)
+- **Phase 1 data hypothesis → Phase 2 一気実装** の段階分けが効く: 30分分析で hypothesis 固定 → 2時間で 4 layer 実装
+- **A/B paper の duplicate は LIVE想定では浪費**: Layer 9 dedup は LIVE移行で必須
+- **legacy互換**: 新 feature は default-off (book_price_min=0 等) で gradual adoption
+
+---
+
 ## 2026-05-25 (PM4) — kabu commission ¥0 retrospective 試算 + onboarding checklist
 
 ### 何を作ったか
