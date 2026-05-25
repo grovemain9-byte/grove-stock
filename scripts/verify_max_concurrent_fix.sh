@@ -129,6 +129,32 @@ FROM positions WHERE entry_date >= $SINCE GROUP BY book ORDER BY book
 ''').fetchall(): print(row)
 "
 
+# Q11: 令和式 exit_reason 分布 (gap_down/trailing/take_profit が実際に発火しているか)
+echo
+echo '=== Q11 令和式 exit_reason 分布 (今日closed) ==='
+$PY -c "
+import duckdb
+con = duckdb.connect('$DB', read_only=True)
+print('--- exit_reason 分布 ---')
+for row in con.execute('''
+SELECT exit_reason, COUNT(*) AS n,
+  ROUND(AVG((exit_price-entry_price)/entry_price)*100,2) AS avg_pct,
+  ROUND(SUM(pnl),0) AS net_pnl
+FROM positions WHERE status=\\'closed\\' AND DATE_TRUNC(\\'day\\', closed_at) = current_date
+GROUP BY exit_reason ORDER BY n DESC
+''').fetchall(): print(row)
+print()
+print('--- max_price_seen 蓄積状況 (open positions) ---')
+for row in con.execute('''
+SELECT book, COUNT(*) AS n,
+  ROUND(AVG(max_price_seen/entry_price),3) AS avg_ratio,
+  ROUND(MAX(max_price_seen/entry_price),3) AS top_ratio,
+  SUM(CASE WHEN max_price_seen >= entry_price*1.015 THEN 1 ELSE 0 END) AS trailing_eligible
+FROM positions WHERE status=\\'open\\' AND max_price_seen IS NOT NULL
+GROUP BY book ORDER BY book
+''').fetchall(): print(row)
+"
+
 # Q9: scan.log から sizing_reason 集計 (今日分のみ)
 echo
 echo '=== Q9 sizing_reason 集計 (logs/scan.log grep) ==='
