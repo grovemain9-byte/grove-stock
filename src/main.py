@@ -370,6 +370,11 @@ def kelly_node(state: ScanState) -> dict:
         regime_filter = state.get("book_regime_filter", False)
         max_concurrent = int(state.get("book_max_concurrent") or MAX_CONCURRENT_POSITIONS)
         existing_tickers = set(state.get("book_open_tickers", set()))
+        # 令和式 per-book playbook (Layer 7/8/9, 2026-05-25)
+        book_price_min = float(state.get("book_price_min") or 0.0)
+        book_price_max = float(state.get("book_price_max") or 1e9)
+        book_consensus_min = int(state.get("book_consensus_min_override") or CONSENSUS_THRESHOLD)
+        globally_taken = state.get("book_globally_taken")  # mutable set | None
     else:
         # 従来経路（dry-run/live/既存テスト）: 挙動不変
         equity = 1_000_000.0
@@ -383,6 +388,11 @@ def kelly_node(state: ScanState) -> dict:
         regime_filter = False  # 従来経路は regime_filter 無し（挙動不変）
         max_concurrent = MAX_CONCURRENT_POSITIONS  # 従来挙動を保存
         existing_tickers = set()
+        # 令和式: legacy 経路は filter 無効化 (旧挙動保存)
+        book_price_min = 0.0
+        book_price_max = 1e9
+        book_consensus_min = CONSENSUS_THRESHOLD
+        globally_taken = None
         try:
             con = get_connection(db_path)
             rows = con.execute("SELECT ticker FROM positions WHERE status = 'open'").fetchall()
@@ -448,6 +458,10 @@ def kelly_node(state: ScanState) -> dict:
         if len(position_size) >= slots_left:
             break  # slots_full は記録しない（A/B比較と無関係）
         consensus = vote_result.get("consensus", 0)
+        # 令和式 Layer 8: per-book consensus override (consensus_min_override)
+        if consensus < book_consensus_min:
+            continue
+        # Phase 0 base check 残しておく (defense-in-depth)
         if consensus < CONSENSUS_THRESHOLD:
             continue
         edge = vote_result.get("dev")
@@ -460,6 +474,40 @@ def kelly_node(state: ScanState) -> dict:
             nikkei_ma25_dev=nikkei_ma25_dev,
             held_tickers=running_held_tickers, db_path=db_path,
         )
+
+        # 令和式 Layer 9: cross-book dedup (大資金 book に先取りされた ticker は skip)
+        if globally_taken is not None and ticker in globally_taken:
+            try:
+                _record_with_evs(
+                    ticker=ticker, decision="pass", today=today,
+                    book=book, consensus=consensus, edge=edge,
+                    council_reason="cross_book_dedup", db_path=db_path,
+                    evs_comp=evs_comp,
+                )
+            except Exception as e:
+                errors.append(f"decision_shadow:{ticker}:{e}")
+            continue
+
+        # 令和式 Layer 7: per-book price band filter + universal SKIP_PRICE_RANGES
+        # 注意: book_price_min > 0 の場合のみ filter適用 (令和式 playbook explicitly configured)
+        # legacy/test path (book_price_min=0.0) では filter 無効化 → 既存 test 挙動保存
+        if df is not None and not df.empty and book_price_min > 0:
+            from config.books import is_price_book_acceptable
+            from collections import namedtuple as _nt
+            current_price = float(df["close"].iloc[-1])
+            _PricedBook = _nt("_PricedBook", ["price_min", "price_max"])
+            _book_proxy = _PricedBook(price_min=book_price_min, price_max=book_price_max)
+            if not is_price_book_acceptable(current_price, _book_proxy):
+                try:
+                    _record_with_evs(
+                        ticker=ticker, decision="pass", today=today,
+                        book=book, consensus=consensus, edge=edge,
+                        council_reason=f"price_filter:{current_price:.0f}", db_path=db_path,
+                        evs_comp=evs_comp,
+                    )
+                except Exception as e:
+                    errors.append(f"decision_shadow:{ticker}:{e}")
+                continue
 
         # A/B: treatment ブックは弱気レジーム(p4)時のみ建玉（regime_filter）。
         if regime_filter and not vote_result.get("p4"):
@@ -709,7 +757,13 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
     logger.info("スキャン完了: %d銘柄, シグナル%d件", len(votes), len(signals))
 
     all_errors = list(s.get("errors", []))
-    for bk in BOOKS:
+    # Layer 9 (令和式 2026-05-25): cross-book signal routing dedup
+    # 大資金 book (routing_priority高) から先に signal を取り、既に取られた ticker は
+    # 後続 book で skip。commission を 1/3.26 削減 (retrospective: 225 trades → 69 unique signals)。
+    globally_taken_tickers: set[str] = set()
+    sorted_books = sorted(BOOKS, key=lambda b: b.routing_priority, reverse=True)
+
+    for bk in sorted_books:
         try:
             con = get_connection(db_path)
             equity, free_cash, open_tk = book_account(con, bk.book_id, bk.initial_capital)
@@ -735,15 +789,23 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
             "book_regime_filter": bk.regime_filter,
             "book_max_concurrent": bk.max_concurrent,
             "book_open_tickers": open_tk,
+            # 令和式 per-book playbook (Layer 7/8/9, 2026-05-25)
+            "book_price_min": bk.price_min,
+            "book_price_max": bk.price_max,
+            "book_consensus_min_override": bk.consensus_min_override,
+            "book_globally_taken": globally_taken_tickers,  # Layer 9 dedup mutable set
         }
         ks = kelly_node(bstate)
         bstate.update(ks)
         ex = execution_node(bstate)
         all_errors += ex.get("errors", [])
 
+        # Layer 9: 新規 entry を globally_taken に追加 (後続 book で重複skip)
         pos = ks.get("position_size", {})
-        logger.info("[%s] equity=%.0f free=%.0f flex=%s 注文%d件",
-                    bk.book_id, equity, free_cash, bk.flex, len(pos))
+        globally_taken_tickers.update(pos.keys())
+
+        logger.info("[%s] equity=%.0f free=%.0f flex=%s 注文%d件 (globally_taken=%d)",
+                    bk.book_id, equity, free_cash, bk.flex, len(pos), len(globally_taken_tickers))
 
     # monitor は全ブック横断で1回
     logger.info("=== monitor_graph 開始 ===")

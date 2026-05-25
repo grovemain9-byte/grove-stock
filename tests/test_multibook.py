@@ -256,7 +256,8 @@ def test_negative_free_cash_book_is_skipped(tmp_path):
     fake_md = {"7203": _make_df([800.0] * 30)}  # ¥800株（少額ブックでも買える）
     # p4=True: treatment(regime_filter)ブックでも建つ＝負free_cashロジックを
     # A/B overlay と独立に検証（本テストの意図は free_cash<0 のskip）
-    fake_votes = {"7203": {"consensus": 3, "p4": True}}
+    # 令和式 (2026-05-25): consensus_min_override=4 デフォルト故、consensus=4 に
+    fake_votes = {"7203": {"consensus": 4, "p4": True}}
 
     with patch("src.main.ingestion_node", return_value={
                 "market_data": fake_md, "nikkei_change": 0.0,
@@ -270,12 +271,15 @@ def test_negative_free_cash_book_is_skipped(tmp_path):
     p1m_open = con.execute(
         "SELECT count(*) FROM positions WHERE book='p1m' AND status='open'"
     ).fetchone()[0]
-    p5m_open = con.execute(
-        "SELECT count(*) FROM positions WHERE book='p5m' AND status='open'"
+    # 令和式 Layer 9 (2026-05-25): cross-book dedup で 1 signal は 1 book のみが取る
+    # 同じ7203 を 全 book で取らず、最高 routing_priority (p50m) が先取り。
+    # よって「他 book any で建玉あり」を確認する形に変更
+    other_open = con.execute(
+        "SELECT count(*) FROM positions WHERE book IN ('p5m','p10m','p30m','p50m') AND status='open'"
     ).fetchone()[0]
     con.close()
     assert p1m_open == 0          # 停止したブックは建玉ゼロ
-    assert p5m_open >= 1          # 他ブックは正常稼働（¥800株を建てた）
+    assert other_open >= 1        # 他ブック (priority上位) のいずれかが正常稼働
 
 
 # === A/B regime_filter（treatmentブックは弱気p4時のみ建玉）===
@@ -399,3 +403,65 @@ def test_execution_defaults_legacy_book(tmp_path):
     row = con.execute("SELECT book FROM positions WHERE status='open'").fetchone()
     con.close()
     assert row == ("legacy",)
+
+
+# === 令和式 per-book playbook (Layer 7/8/9/10, 2026-05-25) ===
+
+class TestPerBookPlaybook:
+    """Grove vision「universal scalable BNF」を実現する per-book playbook 検証."""
+
+    def test_layer7_book_price_min_max_per_book(self):
+        """各 book に固有の price_min/price_max が設定されている (Layer 7)."""
+        from config.books import BOOKS
+        m = {b.book_id: (b.price_min, b.price_max) for b in BOOKS}
+        assert m["p1m"] == (500.0, 3_000.0)    # 1単元 fits ¥1M
+        assert m["p5m"] == (500.0, 5_000.0)
+        assert m["p10m"] == (1_000.0, 10_000.0)
+        assert m["p30m"] == (1_000.0, 20_000.0)
+        assert m["p50m"] == (500.0, 50_000.0)
+
+    def test_layer7_universal_skip_price_ranges(self):
+        """SKIP_PRICE_RANGES (3000-5000) は全 book 共通の disaster zone (Layer 7)."""
+        from config.books import SKIP_PRICE_RANGES, is_price_in_skip_range
+        assert SKIP_PRICE_RANGES == ((3000.0, 5000.0),)
+        assert is_price_in_skip_range(3000.0) is True
+        assert is_price_in_skip_range(4999.0) is True
+        assert is_price_in_skip_range(2999.0) is False
+        assert is_price_in_skip_range(5000.0) is False
+
+    def test_layer7_is_price_book_acceptable(self):
+        """book の価格制約 + SKIP_PRICE_RANGES の組合せ判定."""
+        from config.books import BOOKS, is_price_book_acceptable
+        p1m = BOOKS[0]
+        p50m = BOOKS[4]
+        # p1m: 価格帯 ¥500-3000、SKIP (3000-5000) 適用
+        assert is_price_book_acceptable(1500.0, p1m) is True
+        assert is_price_book_acceptable(3500.0, p1m) is False  # SKIP zone + price_max超
+        assert is_price_book_acceptable(400.0, p1m) is False   # price_min未満
+        # p50m: 価格帯 ¥500-50000、但し SKIP (3000-5000) は適用
+        assert is_price_book_acceptable(7000.0, p50m) is True
+        assert is_price_book_acceptable(4000.0, p50m) is False  # SKIP zone
+        assert is_price_book_acceptable(10000.0, p50m) is True
+
+    def test_layer8_consensus_min_override_all_books_equal_4(self):
+        """令和式: 全 book で consensus≥4 (Phase 1分析根拠: consensus=3 loss-generator)."""
+        from config.books import BOOKS
+        for b in BOOKS:
+            assert b.consensus_min_override == 4, f"{b.book_id}: {b.consensus_min_override}"
+
+    def test_layer9_routing_priority_descending_capital(self):
+        """大資金 book ほど高 priority (cross-book dedup で先取り)."""
+        from config.books import BOOKS
+        for i in range(len(BOOKS) - 1):
+            assert BOOKS[i].routing_priority < BOOKS[i + 1].routing_priority
+
+    def test_layer10_auto_select_book_by_capital(self):
+        """任意 equity から最適 book playbook 自動選択 (Layer 10 universal scalable)."""
+        from config.books import auto_select_book
+        assert auto_select_book(500_000).book_id == "p1m"      # ¥500K → p1m
+        assert auto_select_book(2_500_000).book_id == "p1m"    # ¥2.5M → p1m
+        assert auto_select_book(5_000_000).book_id == "p5m"    # ¥5M → p5m
+        assert auto_select_book(15_000_000).book_id == "p10m"  # ¥15M → p10m
+        assert auto_select_book(25_000_000).book_id == "p30m"  # ¥25M → p30m
+        assert auto_select_book(100_000_000).book_id == "p50m" # ¥100M → p50m
+        assert auto_select_book(1_000_000_000).book_id == "p50m"  # ¥1B → p50m
