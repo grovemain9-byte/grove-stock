@@ -1,5 +1,71 @@
 # grove-stock 建築日誌
 
+## 2026-05-25 (PM3) — auカブコム kabuステーション API 対応スケルトン
+
+### 何を作ったか
+- `src/broker/kabu_com.py` (新規): KabuComClient + MockKabuComClient
+  - BrokerBase 継承で既存 main.py/monitor.py に挿入可能
+  - localhost:18080(本番) / 18081(検証) — Windows VM内 kabuステーション GUI 経由
+  - POST /token → X-API-KEY、POST /sendorder (現物 成行 SOR)、GET /wallet/cash
+  - 法人口座対応 AccountType=12 (個人特定=4 デフォルト)
+  - 流量制限 (発注秒5件、情報秒10件) 内蔵
+- `tests/test_kabu_com.py` (新規、18テスト): interface compliance / login / order body検証 / corporate account / Mock挙動
+
+### なぜ (Grove の AGI fund × broker悩み解決)
+立花e支店: REST API ✅ / 手数料 22bps ❌
+他 broker (SBI/楽天): 手数料 ¥0 ✅ / Windows GUI 必須 (Mac REST API なし) ❌
+→ AGI fund 構造的矛盾
+
+**auカブコム (Mitsubishi UFJ eSmart) が唯一の解**:
+- 国内現物 **手数料 ¥0** (SOR条件)
+- kabuステーション API: REST localhost、個人retail OK、Pro plan自動付帯
+- 制約: Windows VM必要 (Mac側 Python から VM ネットワーク経由でlocalhost:18080呼ぶ)
+
+### Grove の「人間最終クリック必要か」への正確な答え
+- **per-trade: 不要** (POST /sendorder は X-API-KEY ヘッダのみ、GUI確認ダイアログなし)
+- **daily: 不要** (kabuステーション早朝強制ログアウト → cron 8:55 で POST /token 自動再取得)
+- **初期設定: 1回のみ** (kabuステーション GUI で API password 設定)
+- **異常時: token無効 → 自動retry → 失敗時のみGrove介入**
+
+→ **立花e支店と本質的に同じ24h無人運用**、差は VM上のGUI を裏で1つ動かす必要があるだけ。
+
+### Phase 戦略 (個人 → 法人)
+1. Phase 1: 個人口座 (Grove名義) で開設 — 1-2週間、即運用開始、特定口座で税自動
+2. Phase 2: AGI法人設立後 → 法人口座移行 (手数料は同じ ¥0)
+   - 注意: kabuステーション API は公式に「個人向け」明記 → 法人利用可否 要サポート問い合わせ
+   - 制約: 「法人 or 代表者個人 のいずれか1つ」(同名義二重保有不可)
+
+### 途中で踏んだ/回避した地雷
+- kabuステーション API 公式 yaml (v1.5) で確認した事実が私の前認識と異なっていた:
+  - 「複雑な料金体系」→ 実は ¥0 (SOR)
+  - 「個人不可」→ Pro plan で個人OK
+  - 旧推測でなく公式 spec を直接参照することが重要
+- 立花の MockTachibanaClient と異なり、Mock kabu は **commission ¥0** で round-trip 設計
+  - forward paper で立花の22bps削減効果を MockKabuComClient で先行検証可能
+- 信用取引口座 同時開設が Pro plan trigger 条件 (3ヶ月内に1取引必要)
+
+### 検証結果 (skeleton stage)
+- 18 unit tests all pass (interface/login/order body/corporate account/Mock挙動)
+- broker関連 broader regression 91 pass
+- Phase 1完了: 口座開通前でも skeleton実装 + Mock で forward試算可能な状態
+
+### 次に同じことをする人への注意 (Phase 2実装時)
+1. **口座開設は信用取引口座も同時に** (Pro plan trigger 条件)
+2. **Parallels Desktop で Windows 11 VM** 推奨 (UTM は kabuステーション 動作未保証)
+3. **VM ネットワーク = shared (Parallels) or bridged (UTM)** で Mac側Python から `http://10.211.55.X:18080/kabusapi` 形式アクセス
+4. **kabuステーション GUI**は Windows自動起動 + 「API システム設定」で password 固定
+5. **token cache file (.kabu_token)** 推奨 — daily token を file 経由で他プロセスと共有
+6. **Phase 2 で実装すべき不足**:
+   - Order status poller (約定確認 → executed_price 取得)
+   - /positions, /orders 完全実装
+   - /cancelorder (trailing stop の動的キャンセル)
+   - PUSH WebSocket (intraday price 受信 → trailing 精度↑)
+   - 401リトライ (token無効時の自動 re-login)
+   - 取引パスワード (Password field) を環境変数経由で別途設定
+   - 法人 AccountType=12 の実 API 動作確認
+
+---
+
 ## 2026-05-25 (PM2) — 令和式 BNF exit層 全面改修 (3点同時)
 
 ### 何を作ったか (commit 待ち)
