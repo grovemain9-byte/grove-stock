@@ -100,4 +100,42 @@ SELECT ROUND(SUM(pnl),0) FROM positions
 WHERE status=\\'closed\\' AND entry_date >= $SINCE
 ''').fetchone()[0]
 print(f'G3: 全book net PnL = ¥{net} (>-200,000 でGO継続)')
+
+# Q7: 銘柄あたりnotional分布 (2026-05-25 3層cap 効果検証)
+print()
+print('=== Q7 1銘柄あたり notional 分布 (book別) ===')
+print('  Layer 3 (SINGLE_TICKER_MAX=15%) が効いていれば p50m max ≤ ¥7.5M')
+for row in con.execute(f'''
+SELECT book,
+  COUNT(*) AS n,
+  ROUND(AVG(shares*entry_price),0) AS avg_notional,
+  ROUND(MAX(shares*entry_price),0) AS max_notional,
+  ROUND(MAX(shares*entry_price)/CASE book WHEN \\'p50m\\' THEN 50e6
+    WHEN \\'p30m\\' THEN 30e6 WHEN \\'p10m\\' THEN 10e6
+    WHEN \\'p5m\\' THEN 5e6 WHEN \\'p1m\\' THEN 1e6 END * 100, 2) AS max_pct
+FROM positions WHERE entry_date >= $SINCE GROUP BY book ORDER BY book
+''').fetchall(): print(row)
+
+# Q8: book別 entry数 (分散検証)
+print()
+print('=== Q8 book × entry数 (max_concurrent 上限近づき判定) ===')
+for row in con.execute(f'''
+SELECT book, COUNT(*) AS n,
+  CASE book WHEN \\'p50m\\' THEN 20 WHEN \\'p30m\\' THEN 12
+    WHEN \\'p10m\\' THEN 7 WHEN \\'p5m\\' THEN 5 WHEN \\'p1m\\' THEN 2 END AS max_concurrent,
+  ROUND(COUNT(*)*100.0/CASE book WHEN \\'p50m\\' THEN 20 WHEN \\'p30m\\' THEN 12
+    WHEN \\'p10m\\' THEN 7 WHEN \\'p5m\\' THEN 5 WHEN \\'p1m\\' THEN 2 END, 1) AS utilization_pct
+FROM positions WHERE entry_date >= $SINCE GROUP BY book ORDER BY book
+''').fetchall(): print(row)
 "
+
+# Q9: scan.log から sizing_reason 集計 (今日分のみ)
+echo
+echo '=== Q9 sizing_reason 集計 (logs/scan.log grep) ==='
+echo '  slot_limited/ticker_ceiling/cash_limited の発火数 = 3層cap 各layer効果'
+TODAY=$(date "+%Y-%m-%d")
+if [ -f "logs/scan.log" ]; then
+    grep "$TODAY" logs/scan.log 2>/dev/null | grep -oE "limited by [a-z_]+" | sort | uniq -c | sort -rn || echo "(no sizing limits triggered yet)"
+else
+    echo "(scan.log not found)"
+fi
