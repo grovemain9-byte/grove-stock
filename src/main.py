@@ -438,6 +438,12 @@ def kelly_node(state: ScanState) -> dict:
     except Exception as e:
         errors.append(f"router_con:{e}")
 
+    # F9 (concentration penalty) を「同scan内で追加されたtickerも含めて」累積するため
+    # ループ用 running set を別途持つ (2026-05-25 bug fix)。
+    # 旧バグ: existing_tickers は scan前open しか含まず、同scan内で18件同セクター
+    # 入っても F9 fires せず、p50m 19250+85930で資金70%集中の温床になっていた。
+    running_held_tickers: set[str] = set(existing_tickers)
+
     for ticker, vote_result in sorted_votes:
         if len(position_size) >= slots_left:
             break  # slots_full は記録しない（A/B比較と無関係）
@@ -448,10 +454,11 @@ def kelly_node(state: ScanState) -> dict:
         df = market_data.get(ticker)
 
         # EVS を最初に計算（pass経路でも記録するため）
+        # held_tickers = running_held_tickers (同scan内累積) で F9 を正しく動作させる
         evs_comp = _build_evs_for_record(
             ticker=ticker, df=df, vote_result=vote_result,
             nikkei_ma25_dev=nikkei_ma25_dev,
-            held_tickers=existing_tickers, db_path=db_path,
+            held_tickers=running_held_tickers, db_path=db_path,
         )
 
         # A/B: treatment ブックは弱気レジーム(p4)時のみ建玉（regime_filter）。
@@ -538,6 +545,7 @@ def kelly_node(state: ScanState) -> dict:
         if shares > 0:
             position_size[ticker] = shares
             remaining_cash -= shares * price + calc_commission(price, shares)
+            running_held_tickers.add(ticker)  # F9 累積 (2026-05-25 fix)
             try:
                 _record_with_evs(
                     ticker=ticker, decision="go", today=today,

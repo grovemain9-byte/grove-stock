@@ -196,8 +196,71 @@ def assign_regime(nikkei_ma25_dev: Optional[float]) -> str:
 
 
 def assign_sector(ticker: str) -> str:
-    """Ticker → sector bin. Fallback to 'other' for unmapped."""
-    return TICKER_SECTORS.get(ticker, "other")
+    """Ticker → sector bin.
+
+    1. 明示辞書 TICKER_SECTORS にあればそれを使用 (戦略核心の閾値があるpharma/food/chem/sec/tech)
+    2. なければ 4桁前綴 pattern matching (1351銘柄のscope 大半をカバー)
+    3. それでも不明なら 'other'
+
+    Pattern matching根拠 (東証業種コード 第1-2桁ベース、2026-05-25追加):
+      15xx 水産・農林 → food (近い性質)
+      18xx 建設       → const
+      19xx 建設(住宅) → const
+      22xx-23xx 食品  → food
+      28xx-29xx 食品  → food
+      31xx-32xx 繊維  → chem
+      33xx-39xx 化学/紙パ/ガラス/金属 → chem
+      40xx-41xx 化学  → chem
+      42xx-49xx 医薬/石油/ゴム/化学 → chem (4502/4507/4519除く=pharma)
+      50xx 化学/石油/ゴム → chem
+      51xx-58xx 金属/機械/電線 → tech
+      59xx-60xx 機械 → tech
+      61xx-69xx 電機/精密 → tech
+      70xx-77xx 機械/輸送機器 → other (自動車含む)
+      79xx ゲーム/教育 → tech
+      80xx-81xx 商社 → other
+      82xx 小売 → other
+      83xx-86xx 銀行/証券/保険 → sec
+      87xx-89xx 不動産/サービス → other
+      90xx-97xx 運輸/電力/サービス → other
+      98xx-99xx 通信/サービス → tech
+    """
+    # 1. 明示辞書
+    s = TICKER_SECTORS.get(ticker)
+    if s:
+        return s
+
+    # 2. pattern matching (4桁前綴)
+    if not ticker or len(ticker) < 4:
+        return "other"
+    try:
+        prefix = int(ticker[:4])
+    except ValueError:
+        return "other"
+
+    # food (食品系)
+    if 1500 <= prefix < 1700 or 2200 <= prefix < 3000:
+        return "food"
+    # const (建設)
+    if 1800 <= prefix < 2000:
+        return "const"
+    # chem (化学・素材・繊維・紙パ・ガラス・医薬の一部)
+    if 3100 <= prefix < 5100:
+        return "chem"
+    # tech (機械・電機・精密)
+    if 5100 <= prefix < 7000:
+        return "tech"
+    # 79xx ゲーム/教育
+    if 7900 <= prefix < 8000:
+        return "tech"
+    # sec (銀行・証券・保険)
+    if 8300 <= prefix < 8700:
+        return "sec"
+    # 通信・サービス
+    if 9800 <= prefix < 10000:
+        return "tech"
+    # その他 (自動車・小売・運輸・電力・不動産・商社)
+    return "other"
 
 
 def features_to_cell(

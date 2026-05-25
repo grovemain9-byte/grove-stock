@@ -35,11 +35,14 @@ class Book(NamedTuple):
 # ブックに適用して実 paper で対照比較（残りは control＝データ生成も継続）。
 # treatment = {p5m, p30m}（資金規模を散らす）/ control = {p1m, p10m, p50m}。
 BOOKS: tuple[Book, ...] = (
-    Book("p1m", 1_000_000.0, True, regime_filter=False, max_concurrent=2),   # control / ¥500K per slot
-    Book("p5m", 5_000_000.0, True, regime_filter=True, max_concurrent=5),    # treatment / ¥1M per slot
-    Book("p10m", 10_000_000.0, False, regime_filter=False, max_concurrent=7),  # control / ¥1.4M per slot (現状維持)
-    Book("p30m", 30_000_000.0, False, regime_filter=True, max_concurrent=12),  # treatment / ¥2.5M per slot
-    Book("p50m", 50_000_000.0, False, regime_filter=False, max_concurrent=20), # control / ¥2.5M per slot
+    # 2026-05-25 再拡張: 3層cap (slot/cash/ticker) で per_slot動的縮小されるため
+    # max_concurrent を増やしても過剰張りにはならない。p1m/p10m が 100% 利用率に
+    # 達した forward paper 1日目の結果から拡張。
+    Book("p1m", 1_000_000.0, True, regime_filter=False, max_concurrent=4),    # control / per_slot ¥250K
+    Book("p5m", 5_000_000.0, True, regime_filter=True, max_concurrent=10),    # treatment / per_slot ¥500K
+    Book("p10m", 10_000_000.0, False, regime_filter=False, max_concurrent=15), # control / per_slot ¥667K
+    Book("p30m", 30_000_000.0, False, regime_filter=True, max_concurrent=20),  # treatment / per_slot ¥1.5M
+    Book("p50m", 50_000_000.0, False, regime_filter=False, max_concurrent=30), # control / per_slot ¥1.67M
 )
 
 LEGACY_BOOK = "legacy"  # マルチブック化以前の既存3ポジションのタグ

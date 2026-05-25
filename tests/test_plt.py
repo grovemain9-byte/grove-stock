@@ -86,9 +86,46 @@ class TestBinAssignment:
         assert assign_sector("4502") == "pharma"
         assert assign_sector("6758") == "tech"
 
-    def test_sector_unknown_falls_to_other(self):
-        assert assign_sector("9999") == "other"
+    def test_sector_invalid_input_falls_to_other(self):
+        """無効入力 (空文字/4桁未満/非数値) は'other'."""
         assert assign_sector("") == "other"
+        assert assign_sector("abc") == "other"
+        assert assign_sector("12") == "other"
+
+    def test_sector_pattern_matching_5digit(self):
+        """2026-05-25 拡張: 4桁前綴 pattern matching でTICKER_SECTORS辞書
+        外のtickerも分類。1351銘柄ユニバースで F9 concentration が機能するため。"""
+        # food
+        assert assign_sector("15010") == "food"  # 水産農林
+        assert assign_sector("22090") == "food"  # 加工食品
+        assert assign_sector("29310") == "food"  # ユーグレナ (明示辞書既存)
+        # const
+        assert assign_sector("19250") == "const"  # 大和ハウス
+        assert assign_sector("18000") == "const"
+        # chem
+        assert assign_sector("42200") == "chem"
+        assert assign_sector("48390") == "chem"
+        assert assign_sector("39000") == "chem"
+        # tech
+        assert assign_sector("63630") == "tech"
+        assert assign_sector("79740") == "tech"  # 任天堂
+        assert assign_sector("99840") == "tech"  # SBG (明示辞書既存)
+        # sec
+        assert assign_sector("85930") == "sec"
+        assert assign_sector("83060") == "sec"  # 三菱UFJ (明示辞書既存)
+        # other (自動車/小売/運輸)
+        assert assign_sector("70030") == "other"
+        assert assign_sector("70130") == "other"
+        assert assign_sector("82670") == "other"  # イオン
+        assert assign_sector("90200") == "other"  # JR東日本
+
+    def test_sector_explicit_overrides_pattern(self):
+        """明示辞書TICKER_SECTORSが pattern matching より優先される
+        (戦略核心のpharma/食品閾値が変わらないことを保証)."""
+        # 45020 → 明示辞書で pharma (pattern なら 4500 = chem)
+        assert assign_sector("45020") == "pharma"
+        # 5-digit pharma が pattern (chem) より優先
+        assert assign_sector("45190") == "pharma"
 
 
 class TestFeaturesToCell:

@@ -139,3 +139,28 @@ if [ -f "logs/scan.log" ]; then
 else
     echo "(scan.log not found)"
 fi
+
+# Q10: regime_filter A/B 観察 (treatment=p5m/p30m vs control=p1m/p10m/p50m)
+echo
+echo '=== Q10 regime_filter A/B (treatment vs control の entry/勝率比較) ==='
+$PY -c "
+import duckdb
+con = duckdb.connect('$DB', read_only=True)
+print('--- treatment (p5m/p30m) ---')
+for row in con.execute('''
+SELECT \\'treatment\\' AS grp, COUNT(*) AS n,
+  ROUND(SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END)*100.0/NULLIF(COUNT(*),0),1) AS win_pct,
+  ROUND(SUM(pnl),0) AS net_pnl
+FROM positions
+WHERE book IN (\\'p5m\\',\\'p30m\\') AND status=\\'closed\\' AND entry_date >= $SINCE
+''').fetchall(): print(row)
+print('--- control (p1m/p10m/p50m) ---')
+for row in con.execute('''
+SELECT \\'control\\' AS grp, COUNT(*) AS n,
+  ROUND(SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END)*100.0/NULLIF(COUNT(*),0),1) AS win_pct,
+  ROUND(SUM(pnl),0) AS net_pnl
+FROM positions
+WHERE book IN (\\'p1m\\',\\'p10m\\',\\'p50m\\') AND status=\\'closed\\' AND entry_date >= $SINCE
+''').fetchall(): print(row)
+print('--- 注: treatment は p4=False (Nikkei急落時)のみentry なので、件数 < control が正常 ---')
+"

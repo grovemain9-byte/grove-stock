@@ -128,7 +128,7 @@ class TestDecideCap:
         decision = decide_cap(
             con=con, components=comp,
             consensus=3, rsi=30.0, nikkei_ma25_dev=0.01,
-            ticker="9999", decided_date=date(2026, 5, 22),
+            ticker="71000", decided_date=date(2026, 5, 22),  # other sector (auto/machine)
             rng=rng,
         )
         assert decision.source == "plt_cold"
@@ -153,7 +153,7 @@ class TestDecideCap:
         decision = decide_cap(
             con=con, components=comp,
             consensus=3, rsi=30.0, nikkei_ma25_dev=0.01,
-            ticker="9999", decided_date=date(2026, 5, 22),
+            ticker="71000", decided_date=date(2026, 5, 22),  # other sector (auto/machine)
             rng=FakeRNG(),  # type: ignore[arg-type]
         )
         assert decision.source == "exploration"

@@ -321,10 +321,13 @@ class TestPerBookMaxConcurrent:
     """
 
     def test_book_max_concurrent_per_capital(self):
-        """config/books.py で book毎に max_concurrent が資金比で設定されている。"""
+        """config/books.py で book毎に max_concurrent が資金比で設定されている。
+        2026-05-25 拡張: 3層cap (slot/cash/ticker) で per_slot動的縮小されるため
+        max_concurrent 増やしても過剰張りにならず、p1m/p10m 100%利用率を緩和。
+        """
         from config.books import BOOKS
         m = {b.book_id: b.max_concurrent for b in BOOKS}
-        assert m == {"p1m": 2, "p5m": 5, "p10m": 7, "p30m": 12, "p50m": 20}
+        assert m == {"p1m": 4, "p5m": 10, "p10m": 15, "p30m": 20, "p50m": 30}
 
     def test_kelly_node_respects_book_max_concurrent(self):
         """p1m (max=2) は2銘柄保有時、新シグナルを max_concurrent_full でskip。"""
