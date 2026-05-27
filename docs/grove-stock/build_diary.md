@@ -1,5 +1,86 @@
 # grove-stock 建築日誌
 
+## 2026-05-27 — 令和式 BNF era 起点確定 (2026-05-17) + kabu commission ¥0 移行
+
+### Grove 認識訂正の core
+1. **Paper は実お金1円も動かない** (commission も DB上の架空計算)
+2. **実戦は auカブコム (commission ¥0)**、立花は研究用 broker
+3. **paper の commission モデルを kabu ¥0 想定で動かす**べき (立花値で計算してたら kabu 想定の真の pnl が見えない)
+4. **過去 (5/12-5/16) と新時代 (5/17〜) を混ぜないため起点切断**
+
+### 何を作ったか
+- `data/grove_stock.duckdb.bak_pre_kabu_2026-05-27` (バックアップ 12MB)
+- `data/grove_stock.duckdb` 内 positions:
+  - 5/17以降 232件 closed: `commission=0, pnl=(exit-entry)×shares` (gross 値) に再計算
+  - 5/17以降 open positions の entry commission も ¥0
+  - 5/12-5/16 (3件 legacy 立花 era) は **未変更** (歴史記録維持)
+- `monthly_pnl` 全期間再集計
+- `src/data/db.py:calc_commission` → 常に `return 0.0` (kabu SOR想定)
+- `config/strategy_params.py`:
+  - `REIWA_ERA_START = "2026-05-17"` 定数追加
+  - `BROKER_MODE = "kabu"` 定数追加
+- `scripts/verify_max_concurrent_fix.sh`:
+  - SINCE date を 2026-05-25 → 2026-05-17 (令和式 era 全期間)
+  - ヘッダ "令和式 BNF era forward paper verification" に更新
+- `tests/test_multibook.py:test_cap_excludes_when_commission_tips_over`:
+  - 旧立花前提テスト → 令和式 kabu commission ¥0 前提に書換え
+- `tests/test_characterization.py:test_c3_baseline_frozen_g3`:
+  - 3年 backtest baseline 値を kabu commission=0 で再 pin
+  - wins 482→485, win_rate 0.539→0.543, avg_return 0.00241→0.00465 等
+
+### Migration の数値証拠 (before/after)
+
+```
+=== 5/17以降 232件 closed の pnl/commission ===
+Before (立花想定):
+  pnl_sum = -¥658,198
+  commission_sum = ¥608,398
+After (kabu想定):
+  pnl_sum = -¥49,799    (= -658K + 608K)
+  commission_sum = ¥0
+
+=== 5/12-5/16 legacy (未変更) ===
+  3件、 pnl -¥2,020、 commission ¥660 (立花値そのまま)
+```
+
+→ **令和式 era 11営業日 真の net pnl = -¥49,799** (kabu想定、commission ¥0)
+   立花 commission ¥608K がほぼ全損失を作っていたことが確定
+
+### なぜ「過去 5/16以前 触らず」を選んだか
+- **歴史記録維持** (立花 era の historical artifact)
+- 報告/analytics は `REIWA_ERA_START` で filter
+- 削除はリスク (元に戻せない)、touch は記録改ざんに近い
+- 「過去は legacy、5/17から令和式」と clean に分離
+
+### Q1 (dedup削除) を commission議論なしに進めるために
+これまで Davis (私) は「dedup削除すると立花 commission 5倍化」と心配していたが、
+- (a) paper は実コスト ¥0
+- (b) calc_commission が今 ¥0 を返す
+- → dedup の議論は **commission からは完全独立** に。「A/B 独立性 vs LIVE 想定模擬」の design pure trade-off
+
+### 教訓
+- **「立花 paper で動く = 立花 commission で計算するべき」は思い込み**: API動作とコスト計算は分離可能
+- **「kabu 想定」を最初から paper に適用すれば、forward paper の判断材料が実戦と直結**
+- **起点切断** (5/17) で過去の noise を完全排除、データ純度が大幅向上
+- 「Grove 認識訂正」が architecture を救った例 = 1日でcommission議論の混乱を解消
+
+### 次に同じことをする人への注意
+- Paper trading は simulation、commission モデルを broker戦略と一致させる
+- DB の commission カラムは「broker選択コスト」の見積もり、戦略本筋とは独立
+- 起点切断時は backup 必須 (pre/post で混乱しないため)
+- Frozen test (baseline pin) は commission model 変更で再 pin 必要
+
+### 検証結果
+- 392 tests pass (1 deselected pre-existing flake)
+- forward verify (`scripts/verify_max_concurrent_fix.sh`) は 令和式 era 全期間 (5/17〜) を表示
+- p50m net pnl = +¥166,331 (黒字維持) ⭐
+- 全 book net pnl = -¥49,799 (kabu想定、改善継続中)
+- consensus=5 go率 6.1% (枠不足、次の dedup削除議論で改善見込み)
+
+---
+
+
+
 ## 2026-05-25 (PM5) — 令和式 per-book playbook (Layer 7/8/9/10) — universal scalable BNF (commit 660d5ea)
 
 ### 何を作ったか

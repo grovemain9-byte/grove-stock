@@ -53,8 +53,16 @@ COMMISSION_MIN = 110.0    # 最低手数料（税込）
 
 
 def calc_commission(price: float, shares: int) -> float:
-    """片道手数料（税込）。立花証券e支店準拠: 0.1%+10%税、最低¥110。"""
-    return max(COMMISSION_MIN, round(price * shares * COMMISSION_RATE))
+    """片道手数料 (税込).
+
+    2026-05-27 切替: 立花e支店 (0.1%+10%税, min¥110) → kabu (Mitsubishi UFJ eSmart) SOR条件 ¥0.
+    令和式 BNF era (2026-05-17〜) は kabu commission ¥0 想定で paper 運用。
+    立花は内部 broker API 動作のみ継続、commission モデルは kabu 想定に切替。
+
+    過去 (5/12-5/16) の commission データは legacy 立花値 のまま (歴史記録)、
+    5/17以降は ¥0 (DB migration 2026-05-27 で適用済)。
+    """
+    return 0.0
 
 
 def book_account(

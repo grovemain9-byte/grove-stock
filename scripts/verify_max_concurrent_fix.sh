@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # verify_max_concurrent_fix.sh
-# commit c9254b4 (book別 max_concurrent + consensus DESC) の forward paper 効果検証
+# 令和式 BNF era forward paper verification
+# 起点: 2026-05-17 (ユニバース1337銘柄拡大、kabu commission ¥0想定)
 # 使い方: bash scripts/verify_max_concurrent_fix.sh
-# kill_criterion.md のQ1-Q6を順次実行し、GO/KILL条件を機械判定する。
+# Q1-Q11 を実行し、GO/KILL条件を機械判定する。
 
 set -e
 cd "$(dirname "$0")/.."
 
 DB="data/grove_stock.duckdb"
-SINCE="DATE '2026-05-25'"
+# 令和式 BNF era 起点 (2026-05-17): ユニバース 1337 + kabu commission ¥0
+SINCE="DATE '2026-05-17'"
 PY=".venv/bin/python"
 
 echo "=========================================="
-echo "  forward paper verification (commit c9254b4)"
+echo "  forward paper verification (令和式 era 起点 2026-05-17, kabu commission ¥0)"
 echo "  since: $SINCE"
 echo "=========================================="
 echo

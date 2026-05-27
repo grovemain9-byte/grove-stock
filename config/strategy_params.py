@@ -21,6 +21,14 @@ from dataclasses import dataclass
 from config.books import BOOKS, Book
 
 
+# 令和式 BNF era 起点 (2026-05-27 決定):
+# 2026-05-17 = ユニバース 494銘柄→1337銘柄 拡大日、構築開始日
+# この日付以降を「令和式 BNF era」とし、commission ¥0 (kabu SOR想定) で paper運用。
+# 以前 (5/12-5/16) は legacy 立花 era として historical記録のみ、報告/analytics は除外。
+REIWA_ERA_START: str = "2026-05-17"
+BROKER_MODE: str = "kabu"  # commission モデル: "kabu" (¥0 SOR) | "tachibana" (22bps legacy)
+
+
 @dataclass(frozen=True)
 class StrategyParams:
     # --- 指標 (engine.py / players) ---

@@ -191,17 +191,18 @@ class TestBacktest3yBaseline:
                            end_date=self.BASELINE_END,
                            slippage_bps=10.0, apply_commission=True)
         m = res.metrics()
-        # 2026-05-20: new baseline (commit 8af3315 後・p4_required=False semantics)
+        # 2026-05-27: kabu commission ¥0 切替後の new baseline
+        # (令和式 BNF era、calc_commission=0 で backtest pnl が gross 寄りに)
         assert m["total_trades"] == 901
         assert m["closed"] == 894
-        assert m["wins"] == 482
-        assert m["losses"] == 412
-        assert m["win_rate"] == pytest.approx(0.5391498881431768, abs=1e-9)
-        assert m["avg_return"] == pytest.approx(0.002412517675811714, abs=1e-9)
-        assert m["median_return"] == pytest.approx(0.01232384621052739, abs=1e-9)
-        assert m["best"] == pytest.approx(0.46165585528473624, abs=1e-9)
-        assert m["worst"] == pytest.approx(-0.21631562217333358, abs=1e-9)
-        assert m["std"] == pytest.approx(0.08390498303979636, abs=1e-9)
-        assert m["sharpe_per_trade"] == pytest.approx(0.02875297256978707, abs=1e-9)
-        assert m["max_drawdown"] == pytest.approx(-0.26489586906927187, abs=1e-9)
+        assert m["wins"] == 485  # 旧482 → 485 (commission削減で勝利数増)
+        assert m["losses"] == 409  # 旧412 → 409
+        assert m["win_rate"] == pytest.approx(0.5425055928411633, abs=1e-9)
+        assert m["avg_return"] == pytest.approx(0.004653781657914623, abs=1e-9)
+        assert m["median_return"] == pytest.approx(0.01454384621052739, abs=1e-9)
+        assert m["best"] == pytest.approx(0.46436585528473623, abs=1e-9)
+        assert m["worst"] == pytest.approx(-0.21411562217333358, abs=1e-9)
+        assert m["std"] == pytest.approx(0.08395881883433393, abs=1e-9)
+        assert m["sharpe_per_trade"] == pytest.approx(0.05542933693597314, abs=1e-9)
+        assert m["max_drawdown"] == pytest.approx(-0.24584118666325863, abs=1e-9)
         assert m["exit_reasons"] == {"take_profit": 412, "stop_loss": 267, "max_hold": 215}

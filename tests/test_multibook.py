@@ -183,10 +183,14 @@ def test_execution_tags_book(tmp_path):
 
 class TestCashGuardCommission:
     def test_cap_excludes_when_commission_tips_over(self):
-        """¥3000×100=¥30万。手数料330込みで cash¥300,000 では1単元入らない。"""
-        comm = calc_commission(3000.0, 100)  # 3000*100*0.0011=330
-        assert _cap_shares_by_cash(100, 3000.0, 300_000.0) == 0
-        assert _cap_shares_by_cash(100, 3000.0, 300_000.0 + comm) == 100
+        """令和式 (2026-05-27〜): kabu commission ¥0 のため、cash ぴったり ¥300,000 で1単元100株が入る.
+        旧テスト前提 (立花 22bps で手数料が cash tip-over) は legacy era のため無効化."""
+        comm = calc_commission(3000.0, 100)  # kabu mode: 0.0
+        assert comm == 0.0  # 令和式 era invariant
+        # ¥300K cashぴったり、commission ¥0 → 100株 fit
+        assert _cap_shares_by_cash(100, 3000.0, 300_000.0) == 100
+        # ¥299K cash + 0 commission → 1単元 不可 (price*shares > cash)
+        assert _cap_shares_by_cash(100, 3000.0, 299_999.0) == 0
 
     def test_kelly_node_deducts_commission_from_remaining(self):
         """2銘柄連続: 1件目で price*shares+手数料 を引き、2件目は残現金内に収まる。"""
