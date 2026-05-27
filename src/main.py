@@ -374,8 +374,9 @@ def kelly_node(state: ScanState) -> dict:
         book_price_min = float(state.get("book_price_min") or 0.0)
         book_price_max = float(state.get("book_price_max") or 1e9)
         book_consensus_min = int(state.get("book_consensus_min_override") or CONSENSUS_THRESHOLD)
-        # Layer 9 cross-book dedup は 2026-05-27 削除済み (A/B 独立性回復、
-        # kabu commission ¥0 で commission節約理由消滅、LIVE は physical 1-account で自然 dedup)
+        # Phase A Boyd cushion (2026-05-27): sizing_multiplier (≤ 1.0)
+        # run_paper_multibook が drawdown を計測して算出済み、ここで cap_pct に掛ける
+        boyd_cushion = float(state.get("book_boyd_cushion") or 1.0)
     else:
         # 従来経路（dry-run/live/既存テスト）: 挙動不変
         equity = 1_000_000.0
@@ -393,6 +394,7 @@ def kelly_node(state: ScanState) -> dict:
         book_price_min = 0.0
         book_price_max = 1e9
         book_consensus_min = CONSENSUS_THRESHOLD
+        boyd_cushion = 1.0  # legacy: cushion 無効 (full size)
         try:
             con = get_connection(db_path)
             rows = con.execute("SELECT ticker FROM positions WHERE status = 'open'").fetchall()
@@ -553,6 +555,19 @@ def kelly_node(state: ScanState) -> dict:
                     nikkei_ma25_dev=nikkei_ma25_dev,
                     ticker=ticker, decided_date=today,
                 )
+                # Phase A Boyd cushion (2026-05-27): cap_pct を cushion 倍 (DD連動smooth縮小)
+                # cushion=1.0 (HWM超え) → 変化なし、cushion=0.33 (DD-5%) → 33%にsize縮小
+                if boyd_cushion < 1.0:
+                    cushioned_cap = sizing_decision.cap_pct * boyd_cushion
+                    sizing_decision = sizing_decision._replace(cap_pct=cushioned_cap) if hasattr(sizing_decision, '_replace') else type(sizing_decision)(
+                        cap_pct=cushioned_cap,
+                        source=sizing_decision.source,
+                        cell_id=sizing_decision.cell_id,
+                        cell_n_samples=sizing_decision.cell_n_samples,
+                        cell_confidence=sizing_decision.cell_confidence,
+                        exploration_flag=sizing_decision.exploration_flag,
+                        fallback_used=sizing_decision.fallback_used,
+                    )
                 # 残スロット = max_concurrent - (open_count + 今回の position_size 既決定数)
                 slots_remaining_now = max(slots_left - len(position_size), 1)
                 shares, sizing_reason, effective_cap = compute_portfolio_aware_shares(
@@ -758,6 +773,16 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
         try:
             con = get_connection(db_path)
             equity, free_cash, open_tk = book_account(con, bk.book_id, bk.initial_capital)
+            # Phase A Boyd cushion (2026-05-27): HWM 更新 + cushion 計算
+            from src.data.db import update_book_hwm, compute_boyd_cushion
+            from config.strategy_params import (
+                DD_HARD_LIMIT, CUSHION_ALPHA, CUSHION_PAUSE_THRESHOLD,
+            )
+            hwm = update_book_hwm(con, bk.book_id, equity)  # HWM ratchet
+            cushion = compute_boyd_cushion(
+                equity=equity, hwm=hwm,
+                dd_hard_limit=DD_HARD_LIMIT, alpha=CUSHION_ALPHA,
+            )
             con.close()
         except Exception as e:
             all_errors.append(f"book_account:{bk.book_id}:{e}")
@@ -768,6 +793,17 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
             msg = f"book_account:{bk.book_id}:negative_free_cash={free_cash:.0f}"
             logger.warning("[%s] free_cash<0 (%.0f) — ブックを停止", bk.book_id, free_cash)
             all_errors.append(msg)
+            continue
+
+        # Phase A: cushion < threshold で book 全 signal skip (dd_pause)
+        if cushion < CUSHION_PAUSE_THRESHOLD:
+            dd_pct = (equity - hwm) / hwm * 100 if hwm > 0 else 0.0
+            logger.warning(
+                "[%s] dd_pause: equity=¥%.0f HWM=¥%.0f DD=%.2f%% cushion=%.3f",
+                bk.book_id, equity, hwm, dd_pct, cushion,
+            )
+            # decision_shadow に「pass with council_reason=dd_pause」記録は kelly_node で
+            # しない (book 全停止なので skip)。Q4 で kill_criterion に dd_pause threshold追加。
             continue
 
         bstate: ScanState = {
@@ -784,6 +820,8 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
             "book_price_min": bk.price_min,
             "book_price_max": bk.price_max,
             "book_consensus_min_override": bk.consensus_min_override,
+            # Phase A Boyd cushion (2026-05-27): sizing_multiplier として kelly_node で適用
+            "book_boyd_cushion": cushion,
         }
         ks = kelly_node(bstate)
         bstate.update(ks)
@@ -791,8 +829,8 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
         all_errors += ex.get("errors", [])
 
         pos = ks.get("position_size", {})
-        logger.info("[%s] equity=%.0f free=%.0f flex=%s 注文%d件",
-                    bk.book_id, equity, free_cash, bk.flex, len(pos))
+        logger.info("[%s] equity=%.0f free=%.0f flex=%s cushion=%.3f 注文%d件",
+                    bk.book_id, equity, free_cash, bk.flex, cushion, len(pos))
 
     # monitor は全ブック横断で1回
     logger.info("=== monitor_graph 開始 ===")

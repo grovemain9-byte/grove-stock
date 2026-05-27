@@ -65,6 +65,78 @@ def calc_commission(price: float, shares: int) -> float:
     return 0.0
 
 
+def get_book_hwm(con: duckdb.DuckDBPyConnection, book: str, initial_capital: float) -> float:
+    """book の HWM (High-Water-Mark) を取得。未登録なら initial_capital で初期化。
+
+    Phase A Boyd cushion (2026-05-27): book別 equity peak を tracking、cushion計算 base。
+    """
+    row = con.execute(
+        "SELECT hwm_value FROM book_hwm WHERE book_id = ?", [book]
+    ).fetchone()
+    if row is None:
+        # 初回: initial_capital で seed
+        con.execute(
+            "INSERT INTO book_hwm (book_id, hwm_value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            [book, initial_capital],
+        )
+        return float(initial_capital)
+    return float(row[0])
+
+
+def update_book_hwm(con: duckdb.DuckDBPyConnection, book: str, current_equity: float) -> float:
+    """HWM ratchet: current_equity > 現 HWM なら更新、戻り値は新 HWM。
+
+    Phase A Boyd cushion: max equity を保持し続けることで drawdown 計算の正確な base に。
+    """
+    current_hwm = get_book_hwm(con, book, current_equity)
+    if current_equity > current_hwm:
+        con.execute(
+            "UPDATE book_hwm SET hwm_value = ?, updated_at = CURRENT_TIMESTAMP WHERE book_id = ?",
+            [current_equity, book],
+        )
+        return current_equity
+    return current_hwm
+
+
+def compute_boyd_cushion(
+    equity: float, hwm: float, dd_hard_limit: float = -0.075, alpha: float = 1.0,
+) -> float:
+    """Boyd continuous drawdown cushion (frontier math).
+
+    Stanford Boyd 論文 + arXiv 1710.01503 affine feedback law:
+      cushion = max(0, 1 + dd / dd_hard_limit) ** alpha
+      sizing_multiplier *= cushion で smooth に縮小
+
+    本田くん哲学「決まった日数や%で固めない、動的にプラス/マイナス」を frontier 数学で実装。
+    静的 2段階/N段階 discrete より optimal (連続関数で threshold-cliff effect なし)。
+
+    Examples:
+        cushion(equity=100, hwm=100) = 1.0 (満タン)
+        cushion(equity=98, hwm=100) → dd=-2%、cushion ≈ 0.73
+        cushion(equity=95, hwm=100) → dd=-5%、cushion ≈ 0.33
+        cushion(equity=92.5, hwm=100) → dd=-7.5%、cushion = 0.0 (book pause)
+
+    Args:
+        equity: 現在 equity (initial + realized)
+        hwm: book HWM (era 内 max equity)
+        dd_hard_limit: book pause になる DD閾値 (default -0.075)
+        alpha: smooth decay 指数 (1.0=linear、2.0=quadratic)
+
+    Returns:
+        cushion ∈ [0.0, 1.0]
+    """
+    if hwm <= 0:
+        return 1.0  # safety: HWM未初期化なら full size
+    dd = (equity - hwm) / hwm
+    if dd >= 0:
+        return 1.0  # HWM超え = full size
+    if dd <= dd_hard_limit:
+        return 0.0  # ハード上限到達 = pause
+    # dd, dd_hard_limit ともに負数。dd/dd_hard_limit は正の比率 (0 → 1)。
+    # cushion は dd=0 で 1.0、dd=dd_hard_limit で 0.0。逆比例で減算。
+    return max(0.0, 1.0 - dd / dd_hard_limit) ** alpha
+
+
 def book_account(
     con: duckdb.DuckDBPyConnection, book: str, initial_capital: float
 ) -> tuple[float, float, set[str]]:
@@ -152,6 +224,17 @@ def _create_tables(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS book TEXT DEFAULT 'legacy';")
     # 令和式 trailing stop (2026-05-25): max_price_seen を蓄積
     con.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS max_price_seen REAL;")
+
+    # Phase A Boyd cushion (2026-05-27): book別 HWM tracking
+    # HWM = High-Water-Mark (各 book の era 内 max equity)
+    # equity = initial + realized 監視で動的更新、cushion計算に使用
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS book_hwm (
+            book_id TEXT PRIMARY KEY,
+            hwm_value REAL NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS monthly_pnl (

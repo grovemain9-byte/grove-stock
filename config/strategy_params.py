@@ -28,6 +28,19 @@ from config.books import BOOKS, Book
 REIWA_ERA_START: str = "2026-05-17"
 BROKER_MODE: str = "kabu"  # commission モデル: "kabu" (¥0 SOR) | "tachibana" (22bps legacy)
 
+# Phase A: Boyd continuous drawdown cushion (2026-05-27)
+# 本田くん哲学 + Stanford Boyd 論文 + arXiv 1710.01503 affine feedback law:
+#   sizing_multiplier = max(0, 1 + dd / DD_HARD_LIMIT) ** CUSHION_ALPHA
+# 連続関数 (smooth) で「静的 2段階/N段階 discrete」より frontier-optimal。
+# dd = (equity - hwm) / hwm  ∈ [-1, 0]
+#   dd=0      → cushion=1.0   (普通サイズ)
+#   dd=-0.025 → cushion≈0.67  (軽い縮小)
+#   dd=-0.05  → cushion≈0.33  (慎重モード)
+#   dd=-0.075 → cushion=0.0   (book pause)
+DD_HARD_LIMIT: float = -0.075  # この DD でcushion=0、book pause
+CUSHION_ALPHA: float = 1.0     # 1.0=linear、2.0=quadratic decay
+CUSHION_PAUSE_THRESHOLD: float = 0.05  # cushion < 0.05 で book pause (council_reason="dd_pause")
+
 
 @dataclass(frozen=True)
 class StrategyParams:

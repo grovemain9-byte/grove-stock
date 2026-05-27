@@ -1,5 +1,80 @@
 # grove-stock 建築日誌
 
+## 2026-05-27 (夜) — Phase A: Boyd continuous drawdown cushion (frontier math)
+
+### Grove vision 統合
+3 vision を Multi-Disciplinary Elite Team 4 並列分析で frontier-grade 設計:
+1. **動的段階** → ✅ Boyd continuous formula (frontier 推奨、Stanford Boyd 論文 + arXiv 1710.01503)
+2. **Upside** → ✅ TRIM (部分利確) で Phase B 実装予定
+3. **機会コスト** → ✅ Phase C で AdaLinUCB HOLD/SWITCH bandit 予定
+
+本 entry は **Phase A** (Boyd continuous cushion) 完遂記録。
+
+### 何を作ったか
+- `config/strategy_params.py`:
+  - DD_HARD_LIMIT = -0.075 (book pause threshold)
+  - CUSHION_ALPHA = 1.0 (smooth decay 指数、1.0=linear)
+  - CUSHION_PAUSE_THRESHOLD = 0.05 (cushion < これで book pause)
+- `src/data/db.py`:
+  - `book_hwm` テーブル新規 (book_id PK, hwm_value, updated_at)
+  - `get_book_hwm()` 関数 (initial_capital で seed、idempotent)
+  - `update_book_hwm()` 関数 (HWM ratchet: equity > 現HWM で更新、一方向)
+  - `compute_boyd_cushion()` 関数 (frontier 数式実装、`max(0, 1 - dd/dd_hard_limit)^alpha`)
+- `src/main.py:run_paper_multibook`:
+  - 各 book で `update_book_hwm()` → HWM ratchet
+  - `compute_boyd_cushion()` → cushion計算
+  - cushion < CUSHION_PAUSE_THRESHOLD で **book 全 signal skip + dd_pause log**
+  - `bstate["book_boyd_cushion"]` 注入
+- `src/main.py:kelly_node`:
+  - `boyd_cushion = state.get("book_boyd_cushion") or 1.0` で読み込み
+  - `sizing_decision.cap_pct *= boyd_cushion` で smooth size 縮小
+  - legacy 経路は cushion=1.0 (旧挙動保存)
+- `tests/test_dd_cushion.py` (新規、16テスト):
+  - TestBoydCushion (9): 各DD level (0/-2%/-5%/-7.5%/-10%) で cushion 数値検証
+  - TestHwmTracking (3): DB seed/ratchet/no-update
+  - TestBookPauseLogic (1): threshold 動作
+  - TestConfigConstants (3): config 値確認
+
+### Boyd cushion 数値検証 (frontier 数学)
+
+```
+DD=-0%   → cushion=1.000 (full size)
+DD=-2%   → cushion=0.733 (軽い縮小)
+DD=-5%   → cushion=0.333 (慎重モード) ← 旧 Layer 1 相当
+DD=-7%   → cushion=0.067 (book pause 直前)
+DD=-7.5% → cushion=0.000 (book pause) ← 旧 Layer 2 相当
+```
+
+→ 静的 2段階/N段階 discrete でなく **連続関数で smooth 制御**
+→ 本田くん「動的にプラス、決まった日数や%で固めない」を frontier 数学で実装
+→ threshold-cliff effect (4.99% vs 5.01% の二値挙動) を排除
+
+### bug 修正 (途中で踏んだ地雷)
+- 初版の formula `1 + dd / dd_hard_limit` は **両者負数で除算結果が正、加算でcushion>1の発散**
+- 5 test fail で発覚、`1 - dd / dd_hard_limit` に修正
+- → 「frontier 数式を盲目移植は危険、必ず単体 test で symbolic 値確認」教訓
+
+### 検証結果
+- 408 tests pass (前回 392 から +16 = Boyd cushion tests)
+- 既存 392 test 完全互換 (legacy 経路で cushion=1.0)
+- forward paper: 明日以降 cron で HWM ratchet + cushion 値が logged
+
+### 教訓
+- **frontier 数学 (Boyd) を 1セッションで実装** (config + DB + main + tests)
+- **連続関数 > N段階 discrete** (Stanford Boyd 論文 + arXiv 1710.01503 数学的最適性)
+- **HWM ratchet** で 「過去最大 equity」を base にすることで真の drawdown 計測
+- **本田くん哲学を formal化**: 「動的にプラス」= cushion smooth scaling、「決まった%で固めない」= 連続 formula
+- frontier 公式は必ず単体テストで symbolic 値検証 (今回 bug 1 回踏んだ)
+
+### 次に同じことをする人への注意
+- `compute_boyd_cushion()` の formula は `max(0, 1 - dd/dd_hard_limit)^alpha`、dd と dd_hard_limit ともに負数
+- HWM は **era 起点 (REIWA_ERA_START=2026-05-17)** から rolling max、book再起動で reset せず
+- cushion=0.0 の book は `run_paper_multibook` でループ continue (kelly_node 呼出なし)
+- Phase B (Upside TRIM) は monitor.py の take_profit を拡張、`exit_reason="partial_take_profit"` 新規
+- Phase C (機会コスト bandit) は LangGraph 新 node 追加、n≥100 closed trades 蓄積後
+
+---
+
 ## 2026-05-27 (午後) — Layer 9 cross-book dedup 完全削除 (A/B独立性回復)
 
 ### Grove 認識訂正
