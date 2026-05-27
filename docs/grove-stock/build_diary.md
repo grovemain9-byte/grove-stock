@@ -1,5 +1,59 @@
 # grove-stock 建築日誌
 
+## 2026-05-27 (夜 part2) — Track A: p1m custom 「高 conviction 集中」playbook
+
+### Grove 戦略決定
+Dual-track 並走:
+- **Track A**: Option β (現実線、月利 5-10% target) — p1m custom 即実装
+- **Track B**: Honda vision (月利 15-20%) — Multi-Disciplinary Elite Team research
+
+本 entry は **Track A p1m custom** 完了記録。Track B research は別 entry で後述。
+
+### p1m 病巣分析 (5/17-5/27 raw data trace)
+```
+旧 p1m 実績: n=28 trades, 勝率25%, avg -1.16%, net -¥15K
+価格帯別 勝率:
+  ¥0-1K:  11.1% (9件) ← 致命的 loss source
+  ¥1-2K:  25.0% (8件)
+  ¥2-3K:  25.0% (4件)
+  ¥3K+:  42.9% (7件) ← 高価格帯ほど勝率↑、+¥560 黒字
+機会損失: max_concurrent_full 49件 (slot不足で強signal取り逃し)
+```
+
+### 何を作ったか
+- `config/books.py:BOOKS` p1m entry 変更:
+  - price_max: 3000 → **10000** (勝率43%の3K+帯解放)
+  - consensus_min_override: 4 → **5** (最強signal のみ)
+  - max_concurrent: 4 → **2** (集中投資、cap 50%/枠)
+- `tests/test_multibook.py` 3 test 更新:
+  - test_book_max_concurrent_per_capital: p1m 4→2
+  - test_layer7_book_price_min_max_per_book: p1m price_max 3000→10000
+  - test_layer7_is_price_book_acceptable: p1m 7000 OK, 11000 reject に変更
+  - test_layer8_consensus_min_override_per_book: dict assertion (p1m=5, others=4)
+
+### 期待効果
+- 取引数 28 → 5-10 件/週 (signal 数激減、質厳選)
+- 勝率 25% → 80%+ 目標 (consensus=5 + ¥3K+ 高勝率帯)
+- 月利 -1.5% → +5-8% 目標
+- ただし Phase B (Upside TRIM) + 信用 leverage と組み合わせない限り月利15-20%は frontier 研究で impossible 判定 (Track B 結果)
+
+### 検証結果
+- 408 tests pass (Track A 変更後も 408 維持、test 3本更新で 16 new + 3 updated)
+- forward verify: 5/28 9:00 cron で p1m 新 playbook 効果観察
+
+### 教訓
+- **p1m 病巣 = 「低価格帯バイアス」 + 「slot 不足」の 2 因子**
+- 高価格帯は signal 数少ないが勝率高い、small capital の universal 戦略は「絞り込み + 集中」が frontier 一致
+- BNF 本人 ¥1.6M → ¥200B 実績も「集中 + 高 conviction」、grove-stock の small capital playbook 設計と整合
+
+### 次に同じことをする人への注意
+- p1m custom は **他 book の単純コピーでなく 病巣 trace 駆動**
+- price_max 拡張は Nikkei 大型株 (¥10K前後) 込みになる、流動性は十分
+- consensus=5 (P1-P5 全 GO) は signal 数 1/3 程度に絞れる、取引数減覚悟
+- forward 観察で「signal 数少なすぎる」場合は consensus=4 に戻す柔軟性 (Phase 1 hypothesis のみ依存しない)
+
+---
+
 ## 2026-05-27 (夜) — Phase A: Boyd continuous drawdown cushion (frontier math)
 
 ### Grove vision 統合

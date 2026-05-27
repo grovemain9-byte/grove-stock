@@ -335,7 +335,9 @@ class TestPerBookMaxConcurrent:
         """
         from config.books import BOOKS
         m = {b.book_id: b.max_concurrent for b in BOOKS}
-        assert m == {"p1m": 4, "p5m": 10, "p10m": 15, "p30m": 20, "p50m": 30}
+        # 2026-05-27 夜: p1m custom (高 conviction 集中) で max_concurrent 4→2
+        # 病巣分析: p1m が低価格帯バイアス + slot 不足で勝率25%、強signal限定 + 集中投資で勝率↑狙い
+        assert m == {"p1m": 2, "p5m": 10, "p10m": 15, "p30m": 20, "p50m": 30}
 
     def test_kelly_node_respects_book_max_concurrent(self):
         """p1m (max=2) は2銘柄保有時、新シグナルを max_concurrent_full でskip。"""
@@ -415,10 +417,14 @@ class TestPerBookPlaybook:
     """Grove vision「universal scalable BNF」を実現する per-book playbook 検証."""
 
     def test_layer7_book_price_min_max_per_book(self):
-        """各 book に固有の price_min/price_max が設定されている (Layer 7)."""
+        """各 book に固有の price_min/price_max が設定されている (Layer 7).
+
+        2026-05-27 夜 p1m custom: price_max 3000 → 10000
+        理由: 勝率43%の3K+帯を解放、低価格帯バイアス (-2.79% avg) 脱却
+        """
         from config.books import BOOKS
         m = {b.book_id: (b.price_min, b.price_max) for b in BOOKS}
-        assert m["p1m"] == (500.0, 3_000.0)    # 1単元 fits ¥1M
+        assert m["p1m"] == (500.0, 10_000.0)   # 高 conviction 集中、Phase 1 hypothesis
         assert m["p5m"] == (500.0, 5_000.0)
         assert m["p10m"] == (1_000.0, 10_000.0)
         assert m["p30m"] == (1_000.0, 20_000.0)
@@ -434,24 +440,33 @@ class TestPerBookPlaybook:
         assert is_price_in_skip_range(5000.0) is False
 
     def test_layer7_is_price_book_acceptable(self):
-        """book の価格制約 + SKIP_PRICE_RANGES の組合せ判定."""
+        """book の価格制約 + SKIP_PRICE_RANGES の組合せ判定.
+
+        2026-05-27 夜 p1m custom: price_max 3000 → 10000 (高価格帯 勝率43%帯解放)
+        """
         from config.books import BOOKS, is_price_book_acceptable
         p1m = BOOKS[0]
         p50m = BOOKS[4]
-        # p1m: 価格帯 ¥500-3000、SKIP (3000-5000) 適用
+        # p1m: 価格帯 ¥500-10000、SKIP (3000-5000) 適用
         assert is_price_book_acceptable(1500.0, p1m) is True
-        assert is_price_book_acceptable(3500.0, p1m) is False  # SKIP zone + price_max超
+        assert is_price_book_acceptable(4000.0, p1m) is False  # SKIP zone
+        assert is_price_book_acceptable(7000.0, p1m) is True   # 旧 ¥3000上限なら False、新 ¥10000上限で True
+        assert is_price_book_acceptable(11000.0, p1m) is False  # price_max 超
         assert is_price_book_acceptable(400.0, p1m) is False   # price_min未満
         # p50m: 価格帯 ¥500-50000、但し SKIP (3000-5000) は適用
         assert is_price_book_acceptable(7000.0, p50m) is True
         assert is_price_book_acceptable(4000.0, p50m) is False  # SKIP zone
         assert is_price_book_acceptable(10000.0, p50m) is True
 
-    def test_layer8_consensus_min_override_all_books_equal_4(self):
-        """令和式: 全 book で consensus≥4 (Phase 1分析根拠: consensus=3 loss-generator)."""
+    def test_layer8_consensus_min_override_per_book(self):
+        """令和式 Layer 8: book ごとの consensus_min_override.
+
+        2026-05-27 夜 p1m custom: 4 → 5 (高 conviction 集中、最強 signal のみ)
+        他の book は consensus≥4 維持 (Phase 1分析根拠: consensus=3 loss-generator)
+        """
         from config.books import BOOKS
-        for b in BOOKS:
-            assert b.consensus_min_override == 4, f"{b.book_id}: {b.consensus_min_override}"
+        m = {b.book_id: b.consensus_min_override for b in BOOKS}
+        assert m == {"p1m": 5, "p5m": 4, "p10m": 4, "p30m": 4, "p50m": 4}
 
     def test_layer9_dedup_removed(self):
         """Layer 9 cross-book dedup は 2026-05-27 削除済み (A/B 独立性回復)."""

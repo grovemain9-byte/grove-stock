@@ -51,9 +51,18 @@ SKIP_PRICE_RANGES: tuple[tuple[float, float], ...] = (
 # 2026-05-25 令和式 per-book playbook 完全版
 BOOKS: tuple[Book, ...] = (
     Book(
-        "p1m", 1_000_000.0, flex=True, regime_filter=False, max_concurrent=4,
-        price_min=500.0, price_max=3_000.0,   # 1単元 fits ¥1M資金 (¥3000×100=¥300K=30%cap)
-        consensus_min_override=4,              # 令和式: strong signalのみ
+        # p1m custom (2026-05-27 夜): 「高 conviction 集中」型
+        # 病巣分析根拠 (5/17-5/27 raw data):
+        #   旧 p1m: 28 trades, 勝率25%, avg -1.16%, -¥15K
+        #   価格帯別 勝率: 0-1K=11% / 1-2K=25% / 2-3K=25% / 3K+=43% ← 高価格帯ほど勝率↑
+        #   機会損失: max_concurrent_full 49件 (slot 不足)、強signal は cons=5 で更に絞れる
+        # 変更:
+        #   price_max 3000 → 10000  (勝率43%の3K+帯を解放、Nikkei 大型株含む)
+        #   consensus_min_override 4 → 5  (最強signal のみ、勝率最大化)
+        #   max_concurrent 4 → 2  (集中投資、cap 50%/枠で大勝負)
+        "p1m", 1_000_000.0, flex=True, regime_filter=False, max_concurrent=2,
+        price_min=500.0, price_max=10_000.0,
+        consensus_min_override=5,
     ),
     Book(
         "p5m", 5_000_000.0, flex=True, regime_filter=True, max_concurrent=10,
