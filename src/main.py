@@ -370,11 +370,12 @@ def kelly_node(state: ScanState) -> dict:
         regime_filter = state.get("book_regime_filter", False)
         max_concurrent = int(state.get("book_max_concurrent") or MAX_CONCURRENT_POSITIONS)
         existing_tickers = set(state.get("book_open_tickers", set()))
-        # 令和式 per-book playbook (Layer 7/8/9, 2026-05-25)
+        # 令和式 per-book playbook (Layer 7/8, 2026-05-25, 9 removed 2026-05-27)
         book_price_min = float(state.get("book_price_min") or 0.0)
         book_price_max = float(state.get("book_price_max") or 1e9)
         book_consensus_min = int(state.get("book_consensus_min_override") or CONSENSUS_THRESHOLD)
-        globally_taken = state.get("book_globally_taken")  # mutable set | None
+        # Layer 9 cross-book dedup は 2026-05-27 削除済み (A/B 独立性回復、
+        # kabu commission ¥0 で commission節約理由消滅、LIVE は physical 1-account で自然 dedup)
     else:
         # 従来経路（dry-run/live/既存テスト）: 挙動不変
         equity = 1_000_000.0
@@ -392,7 +393,6 @@ def kelly_node(state: ScanState) -> dict:
         book_price_min = 0.0
         book_price_max = 1e9
         book_consensus_min = CONSENSUS_THRESHOLD
-        globally_taken = None
         try:
             con = get_connection(db_path)
             rows = con.execute("SELECT ticker FROM positions WHERE status = 'open'").fetchall()
@@ -475,18 +475,9 @@ def kelly_node(state: ScanState) -> dict:
             held_tickers=running_held_tickers, db_path=db_path,
         )
 
-        # 令和式 Layer 9: cross-book dedup (大資金 book に先取りされた ticker は skip)
-        if globally_taken is not None and ticker in globally_taken:
-            try:
-                _record_with_evs(
-                    ticker=ticker, decision="pass", today=today,
-                    book=book, consensus=consensus, edge=edge,
-                    council_reason="cross_book_dedup", db_path=db_path,
-                    evs_comp=evs_comp,
-                )
-            except Exception as e:
-                errors.append(f"decision_shadow:{ticker}:{e}")
-            continue
+        # Layer 9 cross-book dedup は 2026-05-27 削除済み
+        # 削除理由: A/B paper 独立性回復 (Grove vision「5 book並列独立」、
+        # kabu commission ¥0 で commission節約理由消滅、LIVE は 1-account自然dedup)
 
         # 令和式 Layer 7: per-book price band filter + universal SKIP_PRICE_RANGES
         # 注意: book_price_min > 0 の場合のみ filter適用 (令和式 playbook explicitly configured)
@@ -757,13 +748,13 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
     logger.info("スキャン完了: %d銘柄, シグナル%d件", len(votes), len(signals))
 
     all_errors = list(s.get("errors", []))
-    # Layer 9 (令和式 2026-05-25): cross-book signal routing dedup
-    # 大資金 book (routing_priority高) から先に signal を取り、既に取られた ticker は
-    # 後続 book で skip。commission を 1/3.26 削減 (retrospective: 225 trades → 69 unique signals)。
-    globally_taken_tickers: set[str] = set()
-    sorted_books = sorted(BOOKS, key=lambda b: b.routing_priority, reverse=True)
-
-    for bk in sorted_books:
+    # Layer 9 cross-book dedup 削除済 (2026-05-27 Grove 認識訂正後):
+    # - Paper: 5 book 完全独立 A/B 並列、各 book が同 signal を取って良い
+    #   (Grove vision 「5船は奪い合うでなく独立並列実験」)
+    # - LIVE: auCarbon 1 account = physical制約で自然 dedup、code 不要
+    # - kabu commission ¥0 で commission節約 rationale 消滅
+    # routing_priority sort も不要、BOOKS の宣言順で処理
+    for bk in BOOKS:
         try:
             con = get_connection(db_path)
             equity, free_cash, open_tk = book_account(con, bk.book_id, bk.initial_capital)
@@ -789,23 +780,19 @@ def run_paper_multibook(db_path: str | None = None) -> dict:
             "book_regime_filter": bk.regime_filter,
             "book_max_concurrent": bk.max_concurrent,
             "book_open_tickers": open_tk,
-            # 令和式 per-book playbook (Layer 7/8/9, 2026-05-25)
+            # 令和式 per-book playbook (Layer 7/8, 2026-05-25)
             "book_price_min": bk.price_min,
             "book_price_max": bk.price_max,
             "book_consensus_min_override": bk.consensus_min_override,
-            "book_globally_taken": globally_taken_tickers,  # Layer 9 dedup mutable set
         }
         ks = kelly_node(bstate)
         bstate.update(ks)
         ex = execution_node(bstate)
         all_errors += ex.get("errors", [])
 
-        # Layer 9: 新規 entry を globally_taken に追加 (後続 book で重複skip)
         pos = ks.get("position_size", {})
-        globally_taken_tickers.update(pos.keys())
-
-        logger.info("[%s] equity=%.0f free=%.0f flex=%s 注文%d件 (globally_taken=%d)",
-                    bk.book_id, equity, free_cash, bk.flex, len(pos), len(globally_taken_tickers))
+        logger.info("[%s] equity=%.0f free=%.0f flex=%s 注文%d件",
+                    bk.book_id, equity, free_cash, bk.flex, len(pos))
 
     # monitor は全ブック横断で1回
     logger.info("=== monitor_graph 開始 ===")

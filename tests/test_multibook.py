@@ -275,15 +275,15 @@ def test_negative_free_cash_book_is_skipped(tmp_path):
     p1m_open = con.execute(
         "SELECT count(*) FROM positions WHERE book='p1m' AND status='open'"
     ).fetchone()[0]
-    # 令和式 Layer 9 (2026-05-25): cross-book dedup で 1 signal は 1 book のみが取る
-    # 同じ7203 を 全 book で取らず、最高 routing_priority (p50m) が先取り。
-    # よって「他 book any で建玉あり」を確認する形に変更
+    # 令和式 (2026-05-27): Layer 9 dedup削除後は 5 book 完全独立、
+    # 同 ticker を複数 book が並列 entry する (A/B 独立性)。
+    # よって p5m/p10m/p30m/p50m のいずれかで建玉が立つことを確認 (any-of-many)。
     other_open = con.execute(
         "SELECT count(*) FROM positions WHERE book IN ('p5m','p10m','p30m','p50m') AND status='open'"
     ).fetchone()[0]
     con.close()
     assert p1m_open == 0          # 停止したブックは建玉ゼロ
-    assert other_open >= 1        # 他ブック (priority上位) のいずれかが正常稼働
+    assert other_open >= 1        # 他ブック (規制なし) のいずれか/複数が独立 entry
 
 
 # === A/B regime_filter（treatmentブックは弱気p4時のみ建玉）===
@@ -453,11 +453,11 @@ class TestPerBookPlaybook:
         for b in BOOKS:
             assert b.consensus_min_override == 4, f"{b.book_id}: {b.consensus_min_override}"
 
-    def test_layer9_routing_priority_descending_capital(self):
-        """大資金 book ほど高 priority (cross-book dedup で先取り)."""
-        from config.books import BOOKS
-        for i in range(len(BOOKS) - 1):
-            assert BOOKS[i].routing_priority < BOOKS[i + 1].routing_priority
+    def test_layer9_dedup_removed(self):
+        """Layer 9 cross-book dedup は 2026-05-27 削除済み (A/B 独立性回復)."""
+        from config.books import Book
+        # routing_priority field が Book NamedTuple から削除されている
+        assert "routing_priority" not in Book._fields
 
     def test_layer10_auto_select_book_by_capital(self):
         """任意 equity から最適 book playbook 自動選択 (Layer 10 universal scalable)."""

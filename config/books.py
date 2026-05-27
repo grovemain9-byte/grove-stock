@@ -37,8 +37,8 @@ class Book(NamedTuple):
     # Layer 8: Strategy params per book
     consensus_min_override: int = 4  # 令和式: consensus<4 は skip (旧 CLAUDE.md core =3、override で強化)
 
-    # routing priority: dedup時の優先順位 (高いほど先取り、cross-book dedup用)
-    routing_priority: int = 0  # 大資金=高、小資金=低
+    # routing_priority は 2026-05-27 削除 (Layer 9 cross-book dedup削除に伴い)
+    # 5 book は完全独立 A/B paper、優先順位の概念なし
 
 
 # === 令和式 universal rules (全 book 共通) ===
@@ -54,31 +54,26 @@ BOOKS: tuple[Book, ...] = (
         "p1m", 1_000_000.0, flex=True, regime_filter=False, max_concurrent=4,
         price_min=500.0, price_max=3_000.0,   # 1単元 fits ¥1M資金 (¥3000×100=¥300K=30%cap)
         consensus_min_override=4,              # 令和式: strong signalのみ
-        routing_priority=1,                    # 最後割当 (大資金優先)
     ),
     Book(
         "p5m", 5_000_000.0, flex=True, regime_filter=True, max_concurrent=10,
         price_min=500.0, price_max=5_000.0,    # +¥3-5K帯はSKIP_PRICE_RANGESで弾く
         consensus_min_override=4,
-        routing_priority=2,
     ),
     Book(
         "p10m", 10_000_000.0, flex=False, regime_filter=False, max_concurrent=15,
         price_min=1_000.0, price_max=10_000.0,
         consensus_min_override=4,
-        routing_priority=3,
     ),
     Book(
         "p30m", 30_000_000.0, flex=False, regime_filter=True, max_concurrent=20,
         price_min=1_000.0, price_max=20_000.0,
         consensus_min_override=4,
-        routing_priority=4,
     ),
     Book(
         "p50m", 50_000_000.0, flex=False, regime_filter=False, max_concurrent=30,
         price_min=500.0, price_max=50_000.0,   # 制限最小
         consensus_min_override=4,
-        routing_priority=5,                    # 最優先
     ),
 )
 

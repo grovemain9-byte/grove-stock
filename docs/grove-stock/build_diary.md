@@ -1,5 +1,78 @@
 # grove-stock 建築日誌
 
+## 2026-05-27 (午後) — Layer 9 cross-book dedup 完全削除 (A/B独立性回復)
+
+### Grove 認識訂正
+> 「5船で同じ魚を奪い合うってのが変だから認識について会話したい」
+
+私 (Davis) が 5/25 PM5 に追加した Layer 9 cross-book dedup は概念ミス:
+- **Paper の本質は A/B 独立並列実験** (5 book が同 signal を取って当然)
+- 私が「commission節約」名目で dedup を追加 → 「5船奪い合い」を作ってしまった
+- kabu commission ¥0 移行 (5/27 AM 完了) で commission節約 rationale が消滅
+- LIVE では auCarbon 1-account で physical 自然 dedup → code dedup 不要
+
+### 何を削除したか
+- `src/main.py:run_paper_multibook`:
+  - `globally_taken_tickers: set[str] = set()` 削除
+  - `sorted(BOOKS, key=routing_priority, reverse=True)` 削除 → `for bk in BOOKS:` (宣言順)
+  - bstate の `book_globally_taken` key 削除
+  - `globally_taken_tickers.update(pos.keys())` ループ末尾削除
+  - log message から `globally_taken=%d` 削除
+- `src/main.py:kelly_node`:
+  - `globally_taken = state.get("book_globally_taken")` 削除
+  - legacy 経路 `globally_taken = None` 削除
+  - `if globally_taken is not None and ticker in globally_taken: ... continue` block 削除
+  - council_reason="cross_book_dedup" の発火経路完全消失
+- `config/books.py`:
+  - `Book.routing_priority: int = 0` field 削除
+  - BOOKS の各 entry から `routing_priority=N` 削除
+- `tests/test_multibook.py`:
+  - `test_layer9_routing_priority_descending_capital` → `test_layer9_dedup_removed` に書換え
+  - test_negative_free_cash の comment を「dedup削除後の A/B 独立」前提に更新
+
+### Architecture before/after
+
+```
+Before (5/25-5/27 AM):
+  Paper scan → BOOKS sort by routing_priority DESC
+    → p50m が先取り → globally_taken に add
+    → p30m skip (cross_book_dedup) → ...
+    → 1 signal は 1 book のみ (LIVE 模擬)
+    → A/B 独立性 破壊 ❌
+
+After (5/27 PM):
+  Paper scan → for bk in BOOKS (宣言順):
+    → 各 book が独立に kelly_node 実行
+    → 同 signal を 5 book 並列で取得 (Mock simulation)
+    → A/B 独立データ生成 ✅
+    → 各 book の自然な capacity curve 観察可能
+```
+
+### LIVE 時の保証
+- LIVE = auCarbon 1 account = physical 1-entry/銘柄
+- 同銘柄 2回 buy → broker 側で「合算」or「重複拒否」が自然発生
+- code 上の dedup logic 不要 (physical制約が機能)
+- Phase 2 (kabu Client 完全実装) では `auto_select_book(equity)` で 1 book を選択
+
+### 検証結果
+- 392 tests pass (1 deselected pre-existing flake)
+- main.py から globally_taken / cross_book_dedup / routing_priority 完全消失
+  (`grep` 結果: コメント1箇所のみ残存)
+
+### 教訓
+- **「commission節約」が目的なら broker model を切替えるべきで、戦略 logic を歪めない**
+- **A/B paper の独立性は科学実験の根幹** = dedup で「同 signal 1 book」化はテーマ汚染
+- **LIVE 想定模擬は paper でなく LIVE 専用 code path で行う** (将来 `run_live_single_book(equity)` 関数)
+- Grove 認識訂正 → Davis 削除実装 = 1セッションで architecture clean化
+
+### 次に同じことをする人への注意
+- 「commission節約」名目の logic 追加には注意 (戦略本筋を歪めるリスク)
+- A/B paper は科学実験、LIVE は production、設計目的が異なる
+- 「LIVE 模擬」が要るなら paper code path でなく LIVE 専用 code path を作る
+- Layer 9 復活させる場面は **将来 LIVE 単一 account でも複数 paper book を擬似運用する場合のみ**
+
+---
+
 ## 2026-05-27 — 令和式 BNF era 起点確定 (2026-05-17) + kabu commission ¥0 移行
 
 ### Grove 認識訂正の core
