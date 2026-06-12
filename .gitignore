@@ -1,0 +1,17 @@
+# env / secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+
+# runtime data (DuckDB本体・キャッシュ・ログはgit管理外)
+data/
+logs/
+
+# os
+.DS_Store

@@ -1,0 +1,25 @@
+# 研究/計測層の追加依存（本体 .venv とは論理分離。plan S4）。
+# 本体パイプライン(scan/voting/kelly/monitor/engine)は一切これに依存しない。
+# OSS は src/measurement/ と src/research/ にのみ常駐させる（engine.py 温存）。
+#
+# 各行は feedback_oss_analysis_methodology の6工程精査を通過したもののみ。
+# 精査記録: docs/grove-stock/oss_integration.md
+#
+# !!! 重要 !!! 無印 `empyrical` は 2020年で開発停止（dead）。必ず
+# `empyrical-reloaded`（import名は `empyrical`、Stefan Jansen 保守）を使う。
+# typosquat的混同を防ぐためここに固定。
+
+empyrical-reloaded==0.5.12   # 6工程済(2026-05-16): PyPI実在/pip-audit脆弱性0/
+                             # src純計算(net/exec/書込なし)/Apache2.0。
+                             # 用途: 計測層の追加レンズ(Sharpe/Sortino/Calmar/
+                             # maxDD)。engine.metrics() は ground truth で温存、
+                             # 置換しない。クロスチェック: test_oss_smoke.py
+                             # 注: 推移的依存に peewee(ORM)/bottleneck。stats
+                             # 関数のみ使用しデータ取得系(empyrical.utils)は
+                             # import しない（peewee/web 経路を踏まない）。
+
+# 後送り（G2/G6: 3取引しかない現状では過学習製造機。データ充足後フェーズ）:
+#   stumpy        # matrix profile（パターン発見）
+#   tsfresh       # 特徴量自動生成
+#   vectorbt      # 高速backtest（engine.py置換せず検算用途のみ・要ライセンス確認）
+#   optuna        # HPO（少数paramは既存grid探索で代替評価が先＝G1）
