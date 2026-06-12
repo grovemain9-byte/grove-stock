@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Grep",
+      "Glob",
+      "Bash(PYTEST_DISABLE_PLUGIN_AUTOLOAD=1*)",
+      "Bash(/Users/ryu/grove-stock/.venv/bin/python*)",
+      "Bash(.venv/bin/python*)",
+      "Bash(python3*)",
+      "Bash(ls*)",
+      "Bash(cat*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git show*)",
+      "Bash(git branch*)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git merge*)",
+      "Bash(rm -rf*)",
+      "Bash(crontab*)",
+      "Bash(launchctl*)",
+      "Bash(ssh*)",
+      "Bash(scp*)"
+    ]
+  }
+}
