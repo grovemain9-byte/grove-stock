@@ -16,3 +16,6 @@ __pycache__/
 
 # os
 .DS_Store
+
+# worker使い捨て指示書(merge伝染を防ぐ。2026-06-13実踏)
+WORKER_BRIEF.md
