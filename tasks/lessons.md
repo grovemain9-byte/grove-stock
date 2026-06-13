@@ -20,6 +20,8 @@
 - 2026-06-14 | exit-timing検証は執行タイミングを正しくモデルせよ: MA25等の大引け確定シグナルは『その日のopen』では執行不可(T+1 open or 大引け)。same-day openでbacktestするとcapturability過大評価 | 3-1 W1方法論ミス
 - 2026-06-14 | book削除はDB移行不要=monitorがbook非依存(src/monitor.py:338 WHERE status=open)でBOOKSループ外1回(main.py:837)実行→削除bookの開いた建玉も正常決済(orphan化しない)。config削除=新規建玉が止まるだけ。§2.5 plan-gate(独立opus)が前提を独立再検証+見落とし4テスト捕捉、さらに実読でnegative_free_cash testの5件目を捕捉(self-cert禁止が効いた) | /tiara book 3本化(p1m/p30m/p50m削除→p2m/p5m/p10m)
 - 2026-06-14 | book削減はregime_filter A/Bのtreatment arm縮小に直結(treatment{p5m,p30m}→{p5m}単独)。整理系の変更でも測定中の実験への副作用をsurfaceせよ(silent禁止)。削除bookのclosed履歴はhb_learning._ab_summary(BOOKS非フィルタ)のweekly出力に残る | 同上
+- 2026-06-14 | S1ゲート(建てる前にbacktestでedge実在確認)が北極星本丸2-Bを薄い前提のまま弾いた: 「もみ合い=逆張り/トレンド=順張り切替」非支持(逆張りは上げでP4が既ブロック=穴が無い/順張りは上げで勝たない)。設計研究の前にcheap-failで方向転換=p2m/3-1と同じ勝利パターン。北極星本丸でもS1で安く殺せる | /tiara 2-B Phase A
+- 2026-06-14 | 高勝率regime(逆張り弱気67%)を見たら「厚く張る」前にtail-risk検証必須: 弱気=暴落局面でもあり、平均勝率の裏に致命的左尾(panic買いが反発しない=-50%)が隠れる(boat 87%喪失/R1勝率過大推定)。平均でなく最悪ケースで | 2-B拾った宝(2-I)の安全境界 | 
 
 ## cron・スクリプト設計
 
