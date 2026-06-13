@@ -29,6 +29,9 @@
 - 2026-06-14 | **worker自動GREENはopusでlike-for-like監査必須**: 3-3スクリプトの2.0x基準は「水増し候補Sharpe vs 正直なbaseline MTM Sharpe」のapples-to-oranges比較で自動GREENを出した。同じ土俵(真MTM)だと1.74xで基準未達=YELLOW。worker verdictを鵜呑みにせず独立検証が格下げ | 同上 |
 - 2026-06-14 | **順張りedgeはbeta vs alphaを必ず分離**: 3-3 CAGR+27%は日経buy&hold+18%に対しβ0.45/α+16%=純betaでないが過半が強気連動。2021-26は40年来強気＝順張りに有利な単一regime+survivor bias。alpha主張は時点別universe+bear/range regimeで未検証なら保留 | 同上 |
 - 2026-06-14 | **並列S1ゲートは機能する(4本同時で篩い分け成功)**: 価格データだけで足りるモジュールはsonnet worker×4並列で同時ゲート可能、2 RED即kill/2 YELLOW精査。ただし**workerへのbriefに「自分のbackground結果を回収するまでがタスク」を明示せよ**(2-D workerが自分のbacktest結果を回収せずターン消尽→commander回収。fork不完全終了) | 同上 |
+- 2026-06-14 | **逆張りedgeは非対称(long edgeの符号反転は成立しない)**: 買い(売られ過ぎ→反発)はSharpe0.75だが、空売り対称化(買われ過ぎ→反転)はCAGR-93%/全regime損。2021-26強気相場で買われ過ぎ株は反転せず上昇継続。「鏡像戦略」を仮定するな、必ず実測 | 並列S1ゲート batch2 (research/parallel-s1-gate-batch2.md) |
+- 2026-06-14 | **Sharpe mirage(計測罠その2)**: equity が単調減少(資本bleed)だと日次pct_changeが微小+平均わずか正→MTM Sharpeが技術的に正になり得るがCAGR-93%と併存で無意味。**Sharpeは必ずCAGR/total-returnと突き合わせて解釈**。exit-dump疑似Sharpe(batch1)に続く2つ目。リスク調整指標は単独で信じるな | 同上(3-6 workerが自己捕捉) |
+- 2026-06-14 | **2バッチ通算の地形**: 今日ゲートした8モジュール(2-B/2-I/2-D/2-C/2-H/3-3/3-5/3-6)でclean GREENゼロ。多くは2021-26単一bull regimeのartifact。**既存の長期逆張りbaseline(Sharpe0.75)が何にもクリーンに負けなかった**=新規edge探索より既存の精緻化(3-3決着/2-H DD防御/sizing)が現実的フロンティア | 同上 |
 
 ## cron・スクリプト設計
 
