@@ -21,7 +21,10 @@
 - 2026-06-14 | book削除はDB移行不要=monitorがbook非依存(src/monitor.py:338 WHERE status=open)でBOOKSループ外1回(main.py:837)実行→削除bookの開いた建玉も正常決済(orphan化しない)。config削除=新規建玉が止まるだけ。§2.5 plan-gate(独立opus)が前提を独立再検証+見落とし4テスト捕捉、さらに実読でnegative_free_cash testの5件目を捕捉(self-cert禁止が効いた) | /tiara book 3本化(p1m/p30m/p50m削除→p2m/p5m/p10m)
 - 2026-06-14 | book削減はregime_filter A/Bのtreatment arm縮小に直結(treatment{p5m,p30m}→{p5m}単独)。整理系の変更でも測定中の実験への副作用をsurfaceせよ(silent禁止)。削除bookのclosed履歴はhb_learning._ab_summary(BOOKS非フィルタ)のweekly出力に残る | 同上
 - 2026-06-14 | S1ゲート(建てる前にbacktestでedge実在確認)が北極星本丸2-Bを薄い前提のまま弾いた: 「もみ合い=逆張り/トレンド=順張り切替」非支持(逆張りは上げでP4が既ブロック=穴が無い/順張りは上げで勝たない)。設計研究の前にcheap-failで方向転換=p2m/3-1と同じ勝利パターン。北極星本丸でもS1で安く殺せる | /tiara 2-B Phase A
-- 2026-06-14 | 高勝率regime(逆張り弱気67%)を見たら「厚く張る」前にtail-risk検証必須: 弱気=暴落局面でもあり、平均勝率の裏に致命的左尾(panic買いが反発しない=-50%)が隠れる(boat 87%喪失/R1勝率過大推定)。平均でなく最悪ケースで | 2-B拾った宝(2-I)の安全境界 | 
+- 2026-06-14 | 高勝率regime(逆張り弱気67%)を見たら「厚く張る」前にtail-risk検証必須: 弱気=暴落局面でもあり、平均勝率の裏に致命的左尾(panic買いが反発しない=-50%)が隠れる(boat 87%喪失/R1勝率過大推定)。平均でなく最悪ケースで | 2-B拾った宝(2-I)の安全境界 |
+- 2026-06-14 | **backtest sizing比較は現金/証拠金ゲートが無いとレバレッジ交絡で誤誘導**: engine.pyのentry gateは建玉数チェックのみ(:349)、残高チェック皆無→×2 sizingは最大200%展開し「多く張れば勝つ」をedgeと誤認。cross-variant calmarは等展開に正規化orキャッシュゲート追加してから比較せよ。maxDDはmargin call/強制ロスカットを見ていない | /tiara 2-I S1 tail-gate(独立評価opusが俺の見落としを捕捉) |
+- 2026-06-14 | **calmar/比率指標は年率化してから解釈**: 5年total/maxDDの生calmarは見かけ優位を~6.6倍に錯覚させた(+0.88→年率+0.04≒ノイズ)。big-number framingに飛びつくな。per-trade tail(-46%)もportfolioで1/10に薄まる=多層(per-trade→portfolio→年率→レバレッジ補正)で疑え | 同上 |
+- 2026-06-14 | **「safety装置を外すと成績が上がる」は denominator-swap artifactを疑え**: tail-cap除去で calmar上昇に見えたが、各変種のmaxDDは別々の市場イベント(V0=2025-04/V1b=2024-08/V2a=2022-03)。capは仕事(Aug spike除去)をしたがbinding DDが別暴落に移っただけ。元の破滅仮説は非反発暴落で未検証=反証されてない。independent-evaluatorがself-cert(俺は「厚張れ・capするな」=危険方向に結論しかけ)を救った。3連続cheap-fail gate(p2m/2-B/2-I) | 同上 |
 
 ## cron・スクリプト設計
 

@@ -69,6 +69,9 @@ class Trade:
     consensus_at_entry: int = 0
     pnl_pct: Optional[float] = None
     hold_days: Optional[int] = None
+    # 2-I: entry時のregimeとsize倍率（regime-conditional sizing）。既定=フラット(1.0)で従来挙動。
+    entry_regime: Optional[str] = None
+    size_mult: float = 1.0
 
 
 @dataclass
@@ -192,6 +195,13 @@ def run_backtest(
     rank_candidates: bool = False,   # ①opt-in: 枠超候補を辞書順でなく原理優先順で選別。既定False=従来挙動exact
     take_profit_dev: float = 0.0,    # 2026-05-20 本田MTG bridge: 利確閾値 deviation>=take_profit_dev（既定0=従来挙動exact）
     per_stock_uptrend_required: bool = False,  # 2026-05-20 本田MTG bridge: EMA900上昇時のみエントリ可（既定False=従来挙動exact）
+    # 2-I regime-conditional sizing（研究instrument・default-off）。
+    # ⚠️ LEVERAGE CAVEAT: entry gate は建玉数チェックのみで現金/証拠金制約が無い(下記 entry check 参照)。
+    # multiplier>1 は展開資本を initial_balance 超(最大 max_concurrent×mult×100%)に膨らませる=暗黙レバレッジ。
+    # 変種間の calmar 比較は等展開に正規化するか cash-gate を足してから。maxDD は margin call を見ていない。
+    # 詳細: docs/grove-stock/research/2-I-tail-gate.md (S1 gate RED, defer 2026-06-14)
+    regime_size_multipliers: Optional[dict] = None,  # 2-I: entry-regime別 size倍率 {'bearish':2.0,...}。既定None=フラット(従来exact)
+    bearish_max_concurrent: Optional[int] = None,    # 2-I tail-cap: 弱気entryの同時保有上限。既定None=共通上限のみ(従来exact)
 ) -> BacktestResult:
     """ユニバース全銘柄を対象にPortfolio-level バックテスト。
 
@@ -281,21 +291,23 @@ def run_backtest(
         today_ts = pd.Timestamp(today).normalize()
         nk_dev = nikkei.loc[today_ts, "nikkei_dev"] if today_ts in nikkei.index else None
         p4_pass = (nk_dev is not None) and (nk_dev < p4_threshold)
-        # レジーム判定 (allowed_regimes指定時)
-        if allowed_regimes is not None and nk_dev is not None:
+        # レジーム判定 (allowed_regimes / regime_size_multipliers / bearish_max_concurrent で参照)
+        regime = None
+        if nk_dev is not None:
             if nk_dev >= 0.03:
                 regime = "bullish"
             elif nk_dev <= -0.03:
                 regime = "bearish"
             else:
                 regime = "ranging"
-            if regime not in allowed_regimes:
-                # エントリ禁止日（既存positionのexitのみ継続）
-                _allow_entry = False
-            else:
-                _allow_entry = True
+        # entry許可 (allowed_regimes指定時のみ絞り込み。未指定なら従来どおり常時許可)
+        if allowed_regimes is not None and regime is not None:
+            _allow_entry = regime in allowed_regimes
         else:
             _allow_entry = True
+        # 2-I: 当日entryのsize倍率（entry-regime別）。regime_size_multipliers未指定=1.0(従来)
+        _size_mult = (regime_size_multipliers.get(regime, 1.0)
+                      if regime_size_multipliers else 1.0)
 
         # === exit check ===
         to_close = []
@@ -331,12 +343,12 @@ def run_backtest(
         for code in to_close:
             t = open_positions.pop(code)
             # S7 opt-in: 往復コストを純pnlに反映（既定0=従来挙動 exact）
-            cost_pct = _trade_cost_pct(t.entry_price, t.pnl_pct, position_size,
+            cost_pct = _trade_cost_pct(t.entry_price, t.pnl_pct, position_size * t.size_mult,
                                        slippage_bps, apply_commission)
             if cost_pct:
                 t.pnl_pct = float(t.pnl_pct - cost_pct)
             closed_trades.append(t)
-            balance += position_size * t.pnl_pct
+            balance += position_size * t.size_mult * t.pnl_pct
 
         # === entry check ===
         if _allow_entry and len(open_positions) < max_concurrent_positions:
@@ -373,6 +385,11 @@ def run_backtest(
                 )
                 if not entry_ok:
                     continue
+                # 2-I tail-cap: 弱気entryの同時保有上限（既存弱気建玉が上限なら新規skip）
+                if (bearish_max_concurrent is not None and regime == "bearish"
+                        and sum(1 for t in open_positions.values()
+                                if t.entry_regime == "bearish") >= bearish_max_concurrent):
+                    continue
                 if rank_candidates:
                     # ①ランク選別: 当日全候補を集め原理優先順で上位を採用。
                     # 流動性=売買代金value（無ければvolume）。tuned重み無し＝
@@ -389,6 +406,8 @@ def run_backtest(
                         entry_date=today,
                         entry_price=float(row["close"]),
                         consensus_at_entry=consensus,
+                        entry_regime=regime,
+                        size_mult=_size_mult,
                     )
                     if len(open_positions) >= max_concurrent_positions:
                         break
@@ -397,13 +416,22 @@ def run_backtest(
                 slots = max_concurrent_positions - len(open_positions)
                 # 原理優先: consensus降 → 乖離深(−dev大) → 流動性高。重み学習しない
                 _ranked.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+                _bear_open = sum(1 for t in open_positions.values()
+                                 if t.entry_regime == "bearish")
                 for cons, _ndev, _liq, code, px in _ranked[:max(slots, 0)]:
+                    # 2-I tail-cap: 弱気日のランク採用も上限尊重
+                    if (bearish_max_concurrent is not None and regime == "bearish"
+                            and _bear_open >= bearish_max_concurrent):
+                        break
                     open_positions[code] = Trade(
                         code=code, entry_date=today, entry_price=px,
                         consensus_at_entry=cons,
+                        entry_regime=regime, size_mult=_size_mult,
                     )
+                    if regime == "bearish":
+                        _bear_open += 1
 
-        equity_records.append((today, balance + sum(position_size * ((bar_cache[c][bar_cache[c]["date"]==today]["close"].iloc[0] - t.entry_price)/t.entry_price) for c,t in open_positions.items() if not bar_cache[c][bar_cache[c]["date"]==today].empty)))
+        equity_records.append((today, balance + sum(position_size * t.size_mult * ((bar_cache[c][bar_cache[c]["date"]==today]["close"].iloc[0] - t.entry_price)/t.entry_price) for c,t in open_positions.items() if not bar_cache[c][bar_cache[c]["date"]==today].empty)))
 
     eq = pd.Series({d: b for d,b in equity_records})
     return BacktestResult(trades=closed_trades + list(open_positions.values()), params={
