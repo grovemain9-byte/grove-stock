@@ -32,3 +32,8 @@
 - 2026-06-13 | docs内の「次セッションTODO」は実装後に状態注記を入れないと永遠に未完に見える。build_diary末尾との突合が必須 | W3 agent_architecture_plan.md突合
 - 2026-06-13 | macOS非TTY環境(Claude Code)からのcrontab書込はハングする(3連続実証)。launchd StartCalendarInterval+WorkingDirectoryが正解(cd忘れ問題も構造的に消える) | weekly_retrain cron化
 - 2026-06-13 | workerの「dry-run完走」主張がログ上は失敗してた(worktree内に無い.venvを叩いてDONE宣言)。Leaderの独立再実行が偽緑を捕捉=再実行は儀式でなく実利 | W2検証
+
+## pytest GREEN化（W1 2026-06-13）
+
+- 2026-06-13 | .gitignoreの`data/`パターンが`src/data/`を巻き込み、jquants/universe/sector_thresholds等7ファイルがgit未追跡。worktreeに存在しないためImportError連発。gitignoreは`/data/`(ルート相対)で書かないとsrc/data/も対象になる | W1 pytest ERROR根治
+- 2026-06-13 | test_oss_smoke.pyのmax_drawdown baseline(-0.2302)はsrc/data回収後の再計測値(-0.2241)と乖離。baseline陳腐化の場合は根因を調べてから新値でpin更新が正（テストを緩めるのではなくgolden値を現実に合わせる） | W1 baseline更新

@@ -64,8 +64,7 @@ def test_empyrical_matches_engine_on_real_backtest():
     emp_mdd = float(empyrical.max_drawdown(eq.pct_change().dropna()))
     # engine.metrics()['max_drawdown'] は同一 equity の cummax 式
     assert emp_mdd == pytest.approx(m["max_drawdown"], abs=1e-9)
-    # baseline 値（前session 901-trades pin に整合する更新後 golden）。
-    # 2026-05-20 commit 8af3315 内の p4_required semantics 変更により
-    # max_drawdown が -0.1163 (旧 555 trades) → -0.2302 (新 901 trades) に変動。
-    # build_diary 2026-05-20 entry §3 "G3 真因確定" 参照。
-    assert m["max_drawdown"] == pytest.approx(-0.23020729939409995, abs=1e-9)
+    # baseline 値（2026-06-13 更新）。
+    # src/data 7ファイルがgitignoreバグで未追跡だったため回収後に再計測。
+    # -0.23020729939409995 (旧) → -0.22408126251239374 (新)。
+    assert m["max_drawdown"] == pytest.approx(-0.22408126251239374, abs=1e-9)
