@@ -248,11 +248,11 @@ def test_negative_free_cash_book_is_skipped(tmp_path):
     """実現損が初期資金超過 → そのブックは停止しエラー記録、他ブックは正常稼働。"""
     db = str(tmp_path / "neg.db")
     con = get_connection(db)
-    # p1m に巨額実現損: realized = -1,500,000 → equity=-500,000, free_cash<0
+    # p2m に巨額実現損: realized = -2,500,000 → equity=-500,000(初期¥2M), free_cash<0
     con.execute(
         "INSERT INTO positions (ticker,entry_price,shares,entry_date,status,exit_price,"
         "exit_reason,pnl,commission,book) VALUES "
-        "('LOSS',5000,100,?, 'closed',2000,'stop_loss',-1500000,300,'p1m')",
+        "('LOSS',5000,100,?, 'closed',2000,'stop_loss',-2500000,300,'p2m')",
         [date(2026, 5, 1)],
     )
     con.close()
@@ -270,19 +270,18 @@ def test_negative_free_cash_book_is_skipped(tmp_path):
          patch("src.monitor.run_monitor_cycle", return_value={"exit_decisions": [], "errors": []}):
         r = run_paper_multibook(db_path=db)
 
-    assert any("negative_free_cash" in e and "p1m" in e for e in r["errors"])
+    assert any("negative_free_cash" in e and "p2m" in e for e in r["errors"])
     con = get_connection(db)
-    p1m_open = con.execute(
-        "SELECT count(*) FROM positions WHERE book='p1m' AND status='open'"
+    p2m_open = con.execute(
+        "SELECT count(*) FROM positions WHERE book='p2m' AND status='open'"
     ).fetchone()[0]
-    # 令和式 (2026-05-27): Layer 9 dedup削除後は 5 book 完全独立、
-    # 同 ticker を複数 book が並列 entry する (A/B 独立性)。
-    # よって p5m/p10m/p30m/p50m のいずれかで建玉が立つことを確認 (any-of-many)。
+    # 令和式: book 完全独立、同 ticker を複数 book が並列 entry する (A/B 独立性)。
+    # 3 book化(2026-06-14)後の他 book = p5m/p10m。¥800株は p5m(price_min500,treatment) が entry可。
     other_open = con.execute(
-        "SELECT count(*) FROM positions WHERE book IN ('p5m','p10m','p30m','p50m') AND status='open'"
+        "SELECT count(*) FROM positions WHERE book IN ('p5m','p10m') AND status='open'"
     ).fetchone()[0]
     con.close()
-    assert p1m_open == 0          # 停止したブックは建玉ゼロ
+    assert p2m_open == 0          # 停止したブックは建玉ゼロ
     assert other_open >= 1        # 他ブック (規制なし) のいずれか/複数が独立 entry
 
 
@@ -317,8 +316,9 @@ class TestRegimeFilterAB:
         from config.books import BOOKS
         tr = {b.book_id for b in BOOKS if b.regime_filter}
         ct = {b.book_id for b in BOOKS if not b.regime_filter}
-        assert tr == {"p5m", "p30m"}
-        assert ct == {"p1m", "p10m", "p50m", "p2m"}
+        # 2026-06-14: 3 book化で treatment={p5m}単独に縮小（p30m削除）。A/B規模半減はGrove既知。
+        assert tr == {"p5m"}
+        assert ct == {"p2m", "p10m"}
 
 
 # === book別 max_concurrent + consensus DESC ソート (2026-05-24 修正) ===
@@ -335,9 +335,7 @@ class TestPerBookMaxConcurrent:
         """
         from config.books import BOOKS
         m = {b.book_id: b.max_concurrent for b in BOOKS}
-        # 2026-05-27 夜: p1m custom (高 conviction 集中) で max_concurrent 4→2
-        # 病巣分析: p1m が低価格帯バイアス + slot 不足で勝率25%、強signal限定 + 集中投資で勝率↑狙い
-        assert m == {"p1m": 2, "p5m": 10, "p10m": 15, "p30m": 20, "p50m": 30, "p2m": 3}
+        assert m == {"p2m": 3, "p5m": 10, "p10m": 15}
 
     def test_kelly_node_respects_book_max_concurrent(self):
         """p1m (max=2) は2銘柄保有時、新シグナルを max_concurrent_full でskip。"""
@@ -424,11 +422,9 @@ class TestPerBookPlaybook:
         """
         from config.books import BOOKS
         m = {b.book_id: (b.price_min, b.price_max) for b in BOOKS}
-        assert m["p1m"] == (500.0, 10_000.0)   # 高 conviction 集中、Phase 1 hypothesis
+        assert m["p2m"] == (1_000.0, 10_000.0)
         assert m["p5m"] == (500.0, 5_000.0)
         assert m["p10m"] == (1_000.0, 10_000.0)
-        assert m["p30m"] == (1_000.0, 20_000.0)
-        assert m["p50m"] == (500.0, 50_000.0)
 
     def test_layer7_universal_skip_price_ranges(self):
         """SKIP_PRICE_RANGES (3000-5000) は全 book 共通の disaster zone (Layer 7)."""
@@ -445,18 +441,19 @@ class TestPerBookPlaybook:
         2026-05-27 夜 p1m custom: price_max 3000 → 10000 (高価格帯 勝率43%帯解放)
         """
         from config.books import BOOKS, is_price_book_acceptable
-        p1m = BOOKS[0]
-        p50m = BOOKS[4]
-        # p1m: 価格帯 ¥500-10000、SKIP (3000-5000) 適用
-        assert is_price_book_acceptable(1500.0, p1m) is True
-        assert is_price_book_acceptable(4000.0, p1m) is False  # SKIP zone
-        assert is_price_book_acceptable(7000.0, p1m) is True   # 旧 ¥3000上限なら False、新 ¥10000上限で True
-        assert is_price_book_acceptable(11000.0, p1m) is False  # price_max 超
-        assert is_price_book_acceptable(400.0, p1m) is False   # price_min未満
-        # p50m: 価格帯 ¥500-50000、但し SKIP (3000-5000) は適用
-        assert is_price_book_acceptable(7000.0, p50m) is True
-        assert is_price_book_acceptable(4000.0, p50m) is False  # SKIP zone
-        assert is_price_book_acceptable(10000.0, p50m) is True
+        p2m = BOOKS[0]   # 価格帯 ¥1000-10000
+        p5m = BOOKS[1]   # 価格帯 ¥500-5000
+        # p2m: ¥1000-10000、SKIP (3000-5000) 適用
+        assert is_price_book_acceptable(1500.0, p2m) is True
+        assert is_price_book_acceptable(4000.0, p2m) is False  # SKIP zone
+        assert is_price_book_acceptable(7000.0, p2m) is True
+        assert is_price_book_acceptable(11000.0, p2m) is False  # price_max 超
+        assert is_price_book_acceptable(800.0, p2m) is False    # price_min(1000)未満
+        # p5m: ¥500-5000、但し SKIP (3000-5000) は適用
+        assert is_price_book_acceptable(700.0, p5m) is True
+        assert is_price_book_acceptable(4000.0, p5m) is False   # SKIP zone
+        assert is_price_book_acceptable(2500.0, p5m) is True
+        assert is_price_book_acceptable(6000.0, p5m) is False   # price_max(5000)超
 
     def test_layer8_consensus_min_override_per_book(self):
         """令和式 Layer 8: book ごとの consensus_min_override.
@@ -466,7 +463,7 @@ class TestPerBookPlaybook:
         """
         from config.books import BOOKS
         m = {b.book_id: b.consensus_min_override for b in BOOKS}
-        assert m == {"p1m": 5, "p5m": 4, "p10m": 4, "p30m": 4, "p50m": 4, "p2m": 4}
+        assert m == {"p2m": 4, "p5m": 4, "p10m": 4}
 
     def test_layer9_dedup_removed(self):
         """Layer 9 cross-book dedup は 2026-05-27 削除済み (A/B 独立性回復)."""
@@ -477,10 +474,10 @@ class TestPerBookPlaybook:
     def test_layer10_auto_select_book_by_capital(self):
         """任意 equity から最適 book playbook 自動選択 (Layer 10 universal scalable)."""
         from config.books import auto_select_book
-        assert auto_select_book(500_000).book_id == "p1m"      # ¥500K → p1m
-        assert auto_select_book(2_500_000).book_id == "p1m"    # ¥2.5M → p1m
+        assert auto_select_book(500_000).book_id == "p2m"      # ¥500K → p2m (最小)
+        assert auto_select_book(2_500_000).book_id == "p2m"    # ¥2.5M → p2m
         assert auto_select_book(5_000_000).book_id == "p5m"    # ¥5M → p5m
+        assert auto_select_book(7_000_000).book_id == "p5m"    # ¥7M → p5m
         assert auto_select_book(15_000_000).book_id == "p10m"  # ¥15M → p10m
-        assert auto_select_book(25_000_000).book_id == "p30m"  # ¥25M → p30m
-        assert auto_select_book(100_000_000).book_id == "p50m" # ¥100M → p50m
-        assert auto_select_book(1_000_000_000).book_id == "p50m"  # ¥1B → p50m
+        assert auto_select_book(100_000_000).book_id == "p10m" # ¥100M → p10m (最大)
+        assert auto_select_book(1_000_000_000).book_id == "p10m"  # ¥1B → p10m

@@ -21,14 +21,14 @@ from src.measurement.walk_forward import purged_splits, metrics_from_equity, com
 class TestCapitalTracker:
     def _seed(self, db):
         con = get_connection(db)
-        # p1m: closed +5000(realized), open committed=2000*100+220
+        # p2m: closed +5000(realized), open committed=2000*100+220
         con.execute(
             "INSERT INTO positions (ticker,entry_price,shares,entry_date,status,"
             "exit_reason,pnl,commission,book) VALUES "
-            "('C',1000,100,?, 'closed','take_profit',5000,200,'p1m')", [date(2026, 5, 1)])
+            "('C',1000,100,?, 'closed','take_profit',5000,200,'p2m')", [date(2026, 5, 1)])
         con.execute(
             "INSERT INTO positions (ticker,entry_price,shares,entry_date,status,"
-            "commission,book) VALUES ('O',2000,100,?, 'open',220,'p1m')",
+            "commission,book) VALUES ('O',2000,100,?, 'open',220,'p2m')",
             [date(2026, 5, 12)])
         con.close()
 
@@ -36,13 +36,13 @@ class TestCapitalTracker:
         db = str(tmp_path / "cap.db")
         self._seed(db)
         rows = capital_tracker.snapshot(db, on=date(2026, 5, 16))
-        assert {r["book"] for r in rows} == {"p1m", "p5m", "p10m", "p30m", "p50m", "p2m"}
-        p1m = next(r for r in rows if r["book"] == "p1m")
-        assert p1m["equity"] == 1_005_000.0           # 初期+realized
-        assert p1m["committed"] == pytest.approx(200_220.0)
-        assert p1m["free_cash"] == pytest.approx(1_005_000.0 - 200_220.0)
-        assert p1m["open_count"] == 1
-        assert p1m["slots_left"] == 6                  # max7 - open1
+        assert {r["book"] for r in rows} == {"p2m", "p5m", "p10m"}
+        p2m = next(r for r in rows if r["book"] == "p2m")
+        assert p2m["equity"] == 2_005_000.0           # 初期¥2M+realized
+        assert p2m["committed"] == pytest.approx(200_220.0)
+        assert p2m["free_cash"] == pytest.approx(2_005_000.0 - 200_220.0)
+        assert p2m["open_count"] == 1
+        assert p2m["slots_left"] == 6                  # MAX_CONCURRENT_POSITIONS(7) - open1
 
     def test_idempotent_same_day(self, tmp_path):
         db = str(tmp_path / "cap2.db")
@@ -54,7 +54,7 @@ class TestCapitalTracker:
             "SELECT count(*) FROM capital_state WHERE snapshot_date=?",
             [date(2026, 5, 16)]).fetchone()[0]
         con.close()
-        assert n == 6  # 6ブック分のみ（重複しない、p2m追加）
+        assert n == 3  # 3ブック分のみ（p2m/p5m/p10m）
 
 
 # === decision_shadow: 即日計上禁止（最重要回帰） ===

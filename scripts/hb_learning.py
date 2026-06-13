@@ -4,7 +4,7 @@ cron から人手ゼロで起動し、組織の成長メトリクスを自動蓄
   --daily : capital_tracker.snapshot（資金回転把握）+ decision_shadow
             backfill（go/pass の事後反実仮想を出口日基準で確定）
   --weekly: hypothesis_loop（Shadow=記録のみ・適用ゼロ）+ A/B集計
-            （regime_filter treatment{p5m,p30m} vs control）
+            （regime_filter treatment{p5m} vs control{p2m,p10m}）
 
 全て shadow/記録/read-only。strategy_params も実資金も**一切変更しない**
 （昇格/適用は Grove ゲート）。KAIROS: 異常は記録して継続、危険操作なし。

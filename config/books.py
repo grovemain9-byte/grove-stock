@@ -1,8 +1,9 @@
-"""ペーパー資金ブック定義（5資金規模を並列稼働 + 令和式 per-book playbook）。
+"""ペーパー資金ブック定義（3資金規模 ¥2M/¥5M/¥10M を並列稼働 + 令和式 per-book playbook）。
 
 Grove方針 (2026-05-16):
 - 100株単位は維持（単元未満株にしない）
-- ¥1M/¥5M/¥10M/¥30M/¥50M を別ブックとして並列稼働。各ブック複利。
+- 当初 ¥1M/¥5M/¥10M/¥30M/¥50M を並列稼働。2026-06-14 Grove: 最低単元¥2M化に伴い
+  ¥2M/¥5M/¥10M の3 book に整理（p1m/p30m/p50m 削除＝運用簡素化）。各ブック複利。
 - 少額ブック(¥1M/¥5M)は固定10/15/20%規律だと1単元すら買えずエントリー不能
   → flex=True: 最低1単元保証（上限なし=cashが許す限り）。集中度/回収判断は
     将来 council(本体) が strategy_params 経由で動的に決める前提のレバー。
@@ -48,21 +49,17 @@ SKIP_PRICE_RANGES: tuple[tuple[float, float], ...] = (
 )
 
 
-# 2026-05-25 令和式 per-book playbook 完全版
+# 2026-06-14 Grove: 最低単元¥2M化に伴い 3 book に整理（p1m/p30m/p50m 削除）。
+# 「200万/500万/1000万の3つだけでいい、出ないと大変でしょ」=運用簡素化（edge最適化でなく整理）。
+# 既存 p30m/p50m の open建玉は monitor（book非依存 WHERE status='open'）が正常決済 → orphan化しない。
+# 昇順 (p2m,p5m,p10m)。auto_select_book は index でなく book_id 想定の 3-tier に書換済。
 BOOKS: tuple[Book, ...] = (
+    # p2m (¥2M, entry book / 最小単元): price_min=1000 で p1m敗因（flex最小単元×¥500未満
+    # ゴミ帯=損失97.9%）を回避。cons4=勝book標準。max3=¥2M相応。
     Book(
-        # p1m custom (2026-05-27 夜): 「高 conviction 集中」型
-        # 病巣分析根拠 (5/17-5/27 raw data):
-        #   旧 p1m: 28 trades, 勝率25%, avg -1.16%, -¥15K
-        #   価格帯別 勝率: 0-1K=11% / 1-2K=25% / 2-3K=25% / 3K+=43% ← 高価格帯ほど勝率↑
-        #   機会損失: max_concurrent_full 49件 (slot 不足)、強signal は cons=5 で更に絞れる
-        # 変更:
-        #   price_max 3000 → 10000  (勝率43%の3K+帯を解放、Nikkei 大型株含む)
-        #   consensus_min_override 4 → 5  (最強signal のみ、勝率最大化)
-        #   max_concurrent 4 → 2  (集中投資、cap 50%/枠で大勝負)
-        "p1m", 1_000_000.0, flex=True, regime_filter=False, max_concurrent=2,
-        price_min=500.0, price_max=10_000.0,
-        consensus_min_override=5,
+        "p2m", 2_000_000.0, flex=True, regime_filter=False, max_concurrent=3,
+        price_min=1_000.0, price_max=10_000.0,
+        consensus_min_override=4,
     ),
     Book(
         "p5m", 5_000_000.0, flex=True, regime_filter=True, max_concurrent=10,
@@ -71,23 +68,6 @@ BOOKS: tuple[Book, ...] = (
     ),
     Book(
         "p10m", 10_000_000.0, flex=False, regime_filter=False, max_concurrent=15,
-        price_min=1_000.0, price_max=10_000.0,
-        consensus_min_override=4,
-    ),
-    Book(
-        "p30m", 30_000_000.0, flex=False, regime_filter=True, max_concurrent=20,
-        price_min=1_000.0, price_max=20_000.0,
-        consensus_min_override=4,
-    ),
-    Book(
-        "p50m", 50_000_000.0, flex=False, regime_filter=False, max_concurrent=30,
-        price_min=500.0, price_max=50_000.0,   # 制限最小
-        consensus_min_override=4,
-    ),
-    # p2m (¥2M専用, 2026-06-14 Grove): paper稼働。末尾追加=auto_select_book の BOOKS[0..4] index を壊さない。
-    # price_min=1000: p1m敗因(flex最小単元×¥500未満ゴミ帯=損失97.9%)を回避。cons4=勝book標準(p1mのcons5逸脱は踏襲しない)。max3=¥2M相応。
-    Book(
-        "p2m", 2_000_000.0, flex=True, regime_filter=False, max_concurrent=3,
         price_min=1_000.0, price_max=10_000.0,
         consensus_min_override=4,
     ),
@@ -109,20 +89,19 @@ def auto_select_book(equity: float) -> Book:
         Book NamedTuple — equity に最も適した playbook
 
     例:
-        auto_select_book(2_500_000)  → p1m (1M-3M range)
-        auto_select_book(15_000_000) → p10m (8M-20M range)
-        auto_select_book(100_000_000) → p50m (¥40M+ range)
+        auto_select_book(2_500_000)  → p2m  (< ¥3.5M)
+        auto_select_book(5_000_000)  → p5m  (¥3.5M-7.5M)
+        auto_select_book(15_000_000) → p10m (¥7.5M+)
+
+    注: 本番呼出なし（2026-06-14時点、テストのみ）。tier境界は ¥2M/¥5M/¥10M の
+    幾何中点（≈3.16M/7.07M）を丸めた判断値で live検証はされていない。
     """
-    if equity < 3_000_000:
-        return BOOKS[0]  # p1m: ¥1M-3M
-    elif equity < 8_000_000:
-        return BOOKS[1]  # p5m: ¥3M-8M
-    elif equity < 20_000_000:
-        return BOOKS[2]  # p10m: ¥8M-20M
-    elif equity < 40_000_000:
-        return BOOKS[3]  # p30m: ¥20M-40M
+    if equity < 3_500_000:
+        return BOOKS[0]  # p2m: ~¥2M-3.5M
+    elif equity < 7_500_000:
+        return BOOKS[1]  # p5m: ¥3.5M-7.5M
     else:
-        return BOOKS[4]  # p50m: ¥40M+
+        return BOOKS[2]  # p10m: ¥7.5M+
 
 
 def is_price_in_skip_range(price: float) -> bool:

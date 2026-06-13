@@ -18,6 +18,8 @@
 - 2026-06-14 | per-book/per-cellの成績差を単一config(consensus閾値等)のせいにするな=price帯/資金規模/時期が交絡。config変更の因果主張は**entry_date timingで検証してから**(p1m損失の97.9%がcons5変更5-27より前=cons5は無実、真因はflex最小単元×¥500未満ゴミ帯)。小n(n=33/9日)でconfigフリップ禁止、shadow A/Bで分離検証 | p2m設計を§2.5 plan-gate(独立opus)が却下
 - 2026-06-14 | gotobi(五十日)fadeは本物・gotobi固有(非gotobi exit −17bps vs gotobi +51bps=符号反転、universe 5/6年+)。だがrobust~+6bps小・+17bpsは1ヶ月artifact・北極星に極小→3-1 KILL+bank。R3「+0.5-1.5%」は非再現(実測bps級) | /tiara 3-1 loop W1
 - 2026-06-14 | exit-timing検証は執行タイミングを正しくモデルせよ: MA25等の大引け確定シグナルは『その日のopen』では執行不可(T+1 open or 大引け)。same-day openでbacktestするとcapturability過大評価 | 3-1 W1方法論ミス
+- 2026-06-14 | book削除はDB移行不要=monitorがbook非依存(src/monitor.py:338 WHERE status=open)でBOOKSループ外1回(main.py:837)実行→削除bookの開いた建玉も正常決済(orphan化しない)。config削除=新規建玉が止まるだけ。§2.5 plan-gate(独立opus)が前提を独立再検証+見落とし4テスト捕捉、さらに実読でnegative_free_cash testの5件目を捕捉(self-cert禁止が効いた) | /tiara book 3本化(p1m/p30m/p50m削除→p2m/p5m/p10m)
+- 2026-06-14 | book削減はregime_filter A/Bのtreatment arm縮小に直結(treatment{p5m,p30m}→{p5m}単独)。整理系の変更でも測定中の実験への副作用をsurfaceせよ(silent禁止)。削除bookのclosed履歴はhb_learning._ab_summary(BOOKS非フィルタ)のweekly出力に残る | 同上
 
 ## cron・スクリプト設計
 

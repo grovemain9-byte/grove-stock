@@ -34,9 +34,9 @@
 ## エリア1: コア戦略（現BNF逆張りスイング）
 | M | モジュール | 状態 | edge/現状(実測) | 次アクション | 指標 |
 |---|---|---|---|---|---|
-| 1-1 | 5book並列(p1m/p5m/p10m/p30m/p50m) | ✅稼働 | p50m勝率65.5%(n203)/p30m94.7%/全book黒字 | 観察継続 | book別月利効率 |
+| 1-1 | 3book並列(p2m/p5m/p10m) | ✅稼働 | 2026-06-14 Grove「3本だけ」=最低単元¥2M化でp1m/p30m/p50m削除(運用簡素化・edge最適化でなく整理)。削除book open10件(p30m4/p50m6)はmonitor(book非依存 WHERE status=open)が決済→orphan化なし。444 pytest green | 観察継続 | book別月利効率 |
 | 1-2 | **p2m book(¥2M専用)** | ✅paper稼働 2026-06-14 | books.py末尾追加(¥2M/flex/max3/**price_min¥1k=p1m敗因の¥500未満ゴミ帯回避**/cons4=勝book標準)。実paperサイクルでdecision3/position2 open確認・444 pytest green。**edge未証明**(sane default、結果問わずまず回す方針=Grove) | forward paperでrealized蓄積→edge判定。背景: R2「cons4×1k-3k 78.6%」非再現/p1m損失97.9%はcons5変更前=真因はjunk帯(独立opus catch §2.5 gate初仕事) | 月利vs北極星20% |
-| 1-3 | consensus=5集中(p1m改造型) | 🟡検証中 | 改造後n2/100%(母数不足) | n≥15蓄積待ち | 勝率/PnL |
+| 1-3 | consensus=5集中(p1m改造型) | ⬛retired 2026-06-14 | p1m削除に伴い終了(n2のまま)。3本化で全book cons4標準、cons5逸脱bookは無し | — | — |
 
 ## エリア2: BNF原典の未実装要素（R3発見、出典付き）
 | M | 要素 | 状態 | 内容 | 次 |
