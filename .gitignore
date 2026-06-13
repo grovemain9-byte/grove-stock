@@ -10,8 +10,9 @@ __pycache__/
 .ruff_cache/
 
 # runtime data (DuckDB本体・キャッシュ・ログはgit管理外)
-data/
-logs/
+# 注意: 先頭スラッシュ必須 — `data/` だと src/data/ まで巻き込む(2026-06-13実踏)
+/data/
+/logs/
 
 # os
 .DS_Store
