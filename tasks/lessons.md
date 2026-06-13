@@ -15,6 +15,9 @@
 
 - 2026-05-30 | forward観察は「観察対象を固定し、計測窓を登録基準に厳密一致」。観察期中のbranch開発と計測窓ズレは両方とも誤判定を生む | kill_criterion中間レビュー（verify script窓bug: SINCE=5/17が登録窓5/25を上書き→K5/K1誤発火）
 - 2026-06-13 | .gitignore無しで__pycache__が混ざるとgit statusが汚れ、コア実装86件が未コミットのまま放置される。リポジトリ衛生は並列運転の物理前提 | S0実測
+- 2026-06-14 | per-book/per-cellの成績差を単一config(consensus閾値等)のせいにするな=price帯/資金規模/時期が交絡。config変更の因果主張は**entry_date timingで検証してから**(p1m損失の97.9%がcons5変更5-27より前=cons5は無実、真因はflex最小単元×¥500未満ゴミ帯)。小n(n=33/9日)でconfigフリップ禁止、shadow A/Bで分離検証 | p2m設計を§2.5 plan-gate(独立opus)が却下
+- 2026-06-14 | gotobi(五十日)fadeは本物・gotobi固有(非gotobi exit −17bps vs gotobi +51bps=符号反転、universe 5/6年+)。だがrobust~+6bps小・+17bpsは1ヶ月artifact・北極星に極小→3-1 KILL+bank。R3「+0.5-1.5%」は非再現(実測bps級) | /tiara 3-1 loop W1
+- 2026-06-14 | exit-timing検証は執行タイミングを正しくモデルせよ: MA25等の大引け確定シグナルは『その日のopen』では執行不可(T+1 open or 大引け)。same-day openでbacktestするとcapturability過大評価 | 3-1 W1方法論ミス
 
 ## cron・スクリプト設計
 

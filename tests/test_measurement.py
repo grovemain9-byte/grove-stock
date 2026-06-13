@@ -36,7 +36,7 @@ class TestCapitalTracker:
         db = str(tmp_path / "cap.db")
         self._seed(db)
         rows = capital_tracker.snapshot(db, on=date(2026, 5, 16))
-        assert {r["book"] for r in rows} == {"p1m", "p5m", "p10m", "p30m", "p50m"}
+        assert {r["book"] for r in rows} == {"p1m", "p5m", "p10m", "p30m", "p50m", "p2m"}
         p1m = next(r for r in rows if r["book"] == "p1m")
         assert p1m["equity"] == 1_005_000.0           # 初期+realized
         assert p1m["committed"] == pytest.approx(200_220.0)
@@ -54,7 +54,7 @@ class TestCapitalTracker:
             "SELECT count(*) FROM capital_state WHERE snapshot_date=?",
             [date(2026, 5, 16)]).fetchone()[0]
         con.close()
-        assert n == 5  # 5ブック分のみ（重複しない）
+        assert n == 6  # 6ブック分のみ（重複しない、p2m追加）
 
 
 # === decision_shadow: 即日計上禁止（最重要回帰） ===

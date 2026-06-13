@@ -318,7 +318,7 @@ class TestRegimeFilterAB:
         tr = {b.book_id for b in BOOKS if b.regime_filter}
         ct = {b.book_id for b in BOOKS if not b.regime_filter}
         assert tr == {"p5m", "p30m"}
-        assert ct == {"p1m", "p10m", "p50m"}
+        assert ct == {"p1m", "p10m", "p50m", "p2m"}
 
 
 # === book別 max_concurrent + consensus DESC ソート (2026-05-24 修正) ===
@@ -337,7 +337,7 @@ class TestPerBookMaxConcurrent:
         m = {b.book_id: b.max_concurrent for b in BOOKS}
         # 2026-05-27 夜: p1m custom (高 conviction 集中) で max_concurrent 4→2
         # 病巣分析: p1m が低価格帯バイアス + slot 不足で勝率25%、強signal限定 + 集中投資で勝率↑狙い
-        assert m == {"p1m": 2, "p5m": 10, "p10m": 15, "p30m": 20, "p50m": 30}
+        assert m == {"p1m": 2, "p5m": 10, "p10m": 15, "p30m": 20, "p50m": 30, "p2m": 3}
 
     def test_kelly_node_respects_book_max_concurrent(self):
         """p1m (max=2) は2銘柄保有時、新シグナルを max_concurrent_full でskip。"""
@@ -466,7 +466,7 @@ class TestPerBookPlaybook:
         """
         from config.books import BOOKS
         m = {b.book_id: b.consensus_min_override for b in BOOKS}
-        assert m == {"p1m": 5, "p5m": 4, "p10m": 4, "p30m": 4, "p50m": 4}
+        assert m == {"p1m": 5, "p5m": 4, "p10m": 4, "p30m": 4, "p50m": 4, "p2m": 4}
 
     def test_layer9_dedup_removed(self):
         """Layer 9 cross-book dedup は 2026-05-27 削除済み (A/B 独立性回復)."""

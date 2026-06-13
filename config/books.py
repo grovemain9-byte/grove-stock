@@ -84,6 +84,13 @@ BOOKS: tuple[Book, ...] = (
         price_min=500.0, price_max=50_000.0,   # 制限最小
         consensus_min_override=4,
     ),
+    # p2m (¥2M専用, 2026-06-14 Grove): paper稼働。末尾追加=auto_select_book の BOOKS[0..4] index を壊さない。
+    # price_min=1000: p1m敗因(flex最小単元×¥500未満ゴミ帯=損失97.9%)を回避。cons4=勝book標準(p1mのcons5逸脱は踏襲しない)。max3=¥2M相応。
+    Book(
+        "p2m", 2_000_000.0, flex=True, regime_filter=False, max_concurrent=3,
+        price_min=1_000.0, price_max=10_000.0,
+        consensus_min_override=4,
+    ),
 )
 
 LEGACY_BOOK = "legacy"  # マルチブック化以前の既存3ポジションのタグ

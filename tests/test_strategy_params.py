@@ -68,7 +68,7 @@ def test_matches_universe_and_sector_defaults():
 def test_books_single_source():
     from config.books import BOOKS
     assert DEFAULTS.books == BOOKS
-    assert [b.book_id for b in DEFAULTS.books] == ["p1m", "p5m", "p10m", "p30m", "p50m"]
+    assert [b.book_id for b in DEFAULTS.books] == ["p1m", "p5m", "p10m", "p30m", "p50m", "p2m"]
 
 
 def _wired_modules() -> set[str]:
