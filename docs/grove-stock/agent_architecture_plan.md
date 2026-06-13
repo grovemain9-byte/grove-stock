@@ -151,10 +151,23 @@ grove-stock専用の最小組織（STAGE/council DNAに対応, 全て週次起�
   (不可侵則/悪魔の代弁者)。**ゼロ設計しない**。
 
 ## 次セッションの研究TODO（実装前に詰める＝この設計の入力）
-1. OSS 6工程精査: Optuna/stumpy/empyrical/LangGraph活用可否と統合点（最優先）
+
+<!-- W3 docs-sync 2026-06-13: build_diary末尾 + DB実測と突合して状態注記 -->
+
+1. ~~OSS 6工程精査: Optuna/stumpy/empyrical/LangGraph活用可否と統合点（最優先）~~
+   **→ 完了 (2026-05-16)**: `docs/grove-stock/oss_integration.md` に全6工程記録済み。
+   empyrical-reloaded 採用。Optuna/stumpy/tsfresh はデータ不足で凍結（S5 データ充足後）。
 2. エージェント毎config仕様: 各役割の model / 許可skill / MCP / 参照OSS /
    起動トリガ / 書込スコープ を表で確定（agent定義ファイル設計）
+   **→ 未着手**（S1 GO まで凍結）
 3. サブスク枠の実コスト試算: 週次council 1回のtoken×LLM単価、枠内に収まるか実測
-4. capital tracker / decision_shadow / walk-forward harness の実装設計
+   **→ 未着手**
+4. ~~capital tracker / decision_shadow / walk-forward harness の実装設計~~
+   **→ 一部完了**:
+   - `decision_shadow` テーブル: 実装済 (2026-05-20、DB実測 2,428 records, 〜2026-06-12)
+   - apply/revert harness: `src/measurement/discipline_apply.py` 完了 (2026-05-19)
+   - `capital_state` テーブル: 既存 DB に存在、book ごとの HWM/cushion 管理済
+   - **残**: S1 GO 後の walk-forward harness 本格実装
 5. 部署観点: grove-stock単体か、他PJ(funding/keirin)と共有の「研究部」に集約か
    （組織としての流れ。Grove判断要）
+   **→ 未決定**（Grove 承認待ち）
