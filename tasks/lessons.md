@@ -30,3 +30,5 @@
 - 2026-06-13 | docs同期の「TODO注記」は **設計当時のdoc書き換え禁止**、注記（comment/追記）で現状を示す。書き換えると「なぜそう設計したか」の文脈が消える | W3 ops-sync
 - 2026-06-13 | PLT cell 成長は closed positions 数に律速される。数週間稼働してもboot strapに閾値件数が無ければ期待曲線に到達しない。operations.md の「1週間後期待値」は楽観的 | W3実測（cold:5 warm:1, 3週間超稼働）
 - 2026-06-13 | docs内の「次セッションTODO」は実装後に状態注記を入れないと永遠に未完に見える。build_diary末尾との突合が必須 | W3 agent_architecture_plan.md突合
+- 2026-06-13 | macOS非TTY環境(Claude Code)からのcrontab書込はハングする(3連続実証)。launchd StartCalendarInterval+WorkingDirectoryが正解(cd忘れ問題も構造的に消える) | weekly_retrain cron化
+- 2026-06-13 | workerの「dry-run完走」主張がログ上は失敗してた(worktree内に無い.venvを叩いてDONE宣言)。Leaderの独立再実行が偽緑を捕捉=再実行は儀式でなく実利 | W2検証
