@@ -59,6 +59,10 @@ FROM plt_cells GROUP BY confidence ORDER BY confidence;
 1週間後: cold:15 warm:8 hot:2
 1ヶ月後: cold:30 warm:30 hot:15
 
+> **⚠️ 2026-06-13 実測**: cold:5 warm:1 total_samples:17（稼働3週間超）。
+> 1週間後の期待に未到達。原因は PLT bootstrap の closed positions 不足。
+> トラブルシューティング「PLT cell が成長しない」参照。
+
 ---
 
 ## 🔬 週次レポート (金曜夕方)
@@ -147,11 +151,11 @@ hold 5 営業日上限なので、最大 5 日待ち。 5 日経っても NULL �
 
 | 日付 | 期待状態 | 行動 |
 |------|---------|------|
-| 5/22 (火) 9:30 | 初回 cron 起動 | health check (1-5) |
-| 5/23 (水) 9:30 | 2日目稼働 + cf 確定 1-3 件 | sizing_source 分布変化観測 |
-| 5/26 (月) | n+25 trades 目標 | exploration EV 中間集計 |
-| 5/30 (金) | n+50 trades 目標 | weekly_retrain 初回実行 |
-| 6/20 (金) | n+200 trades 目標 | PLT cell hot 数を Grove に報告 |
+| 5/22 (火) 9:30 | 初回 cron 起動 ✅ | health check (1-5) |
+| 5/23 (水) 9:30 | 2日目稼働 + cf 確定 1-3 件 ✅ | sizing_source 分布変化観測 |
+| 5/26 (月) | n+25 trades 目標 ✅ | exploration EV 中間集計 |
+| 5/30 (金) | n+50 trades 目標 ✅ | weekly_retrain 初回実行 |
+| 6/20 (金) | n+200 trades 目標 → **2026-06-12 時点 closed:464 件（超過達成 ✅）** | PLT cell hot 数を Grove に報告 |
 
 ---
 

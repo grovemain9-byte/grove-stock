@@ -24,3 +24,9 @@
 ## 運転（Boris式ループ）
 
 - 2026-06-13 | planの単位は「単発タスク」でなく「運転体制」。タスク1個のplanを繰り返すのは弱い提案 | Grove訂正（Davis側feedbackにも焼く）
+
+## ドキュメント同期（W3 docs-sync 2026-06-13）
+
+- 2026-06-13 | docs同期の「TODO注記」は **設計当時のdoc書き換え禁止**、注記（comment/追記）で現状を示す。書き換えると「なぜそう設計したか」の文脈が消える | W3 ops-sync
+- 2026-06-13 | PLT cell 成長は closed positions 数に律速される。数週間稼働してもboot strapに閾値件数が無ければ期待曲線に到達しない。operations.md の「1週間後期待値」は楽観的 | W3実測（cold:5 warm:1, 3週間超稼働）
+- 2026-06-13 | docs内の「次セッションTODO」は実装後に状態注記を入れないと永遠に未完に見える。build_diary末尾との突合が必須 | W3 agent_architecture_plan.md突合
