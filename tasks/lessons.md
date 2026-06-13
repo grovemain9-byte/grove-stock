@@ -25,6 +25,10 @@
 - 2026-06-14 | **backtest sizing比較は現金/証拠金ゲートが無いとレバレッジ交絡で誤誘導**: engine.pyのentry gateは建玉数チェックのみ(:349)、残高チェック皆無→×2 sizingは最大200%展開し「多く張れば勝つ」をedgeと誤認。cross-variant calmarは等展開に正規化orキャッシュゲート追加してから比較せよ。maxDDはmargin call/強制ロスカットを見ていない | /tiara 2-I S1 tail-gate(独立評価opusが俺の見落としを捕捉) |
 - 2026-06-14 | **calmar/比率指標は年率化してから解釈**: 5年total/maxDDの生calmarは見かけ優位を~6.6倍に錯覚させた(+0.88→年率+0.04≒ノイズ)。big-number framingに飛びつくな。per-trade tail(-46%)もportfolioで1/10に薄まる=多層(per-trade→portfolio→年率→レバレッジ補正)で疑え | 同上 |
 - 2026-06-14 | **「safety装置を外すと成績が上がる」は denominator-swap artifactを疑え**: tail-cap除去で calmar上昇に見えたが、各変種のmaxDDは別々の市場イベント(V0=2025-04/V1b=2024-08/V2a=2022-03)。capは仕事(Aug spike除去)をしたがbinding DDが別暴落に移っただけ。元の破滅仮説は非反発暴落で未検証=反証されてない。independent-evaluatorがself-cert(俺は「厚張れ・capするな」=危険方向に結論しかけ)を救った。3連続cheap-fail gate(p2m/2-B/2-I) | 同上 |
+- 2026-06-14 | **exit-dump疑似Sharpeの罠**: per-trade PnLを「exit日にdumpする」系列でSharpeを取ると、lumpyな分散で過大化(3-3 worker報告1.73→opus真MTM curve 1.47、maxDDも-17%→-21.7%)。リスク調整指標は必ず真のmark-to-market portfolio curveで測れ。trailing(2-H)も同型注意 | 並列S1ゲート batch1 (research/parallel-s1-gate-batch1.md) |
+- 2026-06-14 | **worker自動GREENはopusでlike-for-like監査必須**: 3-3スクリプトの2.0x基準は「水増し候補Sharpe vs 正直なbaseline MTM Sharpe」のapples-to-oranges比較で自動GREENを出した。同じ土俵(真MTM)だと1.74xで基準未達=YELLOW。worker verdictを鵜呑みにせず独立検証が格下げ | 同上 |
+- 2026-06-14 | **順張りedgeはbeta vs alphaを必ず分離**: 3-3 CAGR+27%は日経buy&hold+18%に対しβ0.45/α+16%=純betaでないが過半が強気連動。2021-26は40年来強気＝順張りに有利な単一regime+survivor bias。alpha主張は時点別universe+bear/range regimeで未検証なら保留 | 同上 |
+- 2026-06-14 | **並列S1ゲートは機能する(4本同時で篩い分け成功)**: 価格データだけで足りるモジュールはsonnet worker×4並列で同時ゲート可能、2 RED即kill/2 YELLOW精査。ただし**workerへのbriefに「自分のbackground結果を回収するまでがタスク」を明示せよ**(2-D workerが自分のbacktest結果を回収せずターン消尽→commander回収。fork不完全終了) | 同上 |
 
 ## cron・スクリプト設計
 
